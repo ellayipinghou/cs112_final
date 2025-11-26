@@ -26,6 +26,32 @@
 #define BUFFER_SIZE 32768
 #define HTML_BUFFER_SIZE 262144
 
+// const char *CHATBOT_SNIPPET =
+// "<div id=\"mitm-chatbot-box\" style=\"position:fixed;bottom:20px;right:20px;width:300px;background:white;border:1px solid #ccc;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);padding:10px;font-family:sans-serif;z-index:10000\">\n"
+// "  <h3 style=\"margin:0 0 10px 0;font-size:14px;color:#333\">Chat Assistant</h3>\n"
+// "  <div id=\"mitm-chatbot-reply\" style=\"max-height:200px;overflow-y:auto;margin-bottom:10px;padding:5px;background:#f9f9f9;border-radius:4px;font-size:12px\"></div>\n"
+// "  <input type=\"text\" id=\"mitm-chatbot-input\" placeholder=\"Type a message...\" style=\"width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:12px;box-sizing:border-box\" />\n"
+// "</div>\n"
+// "\n"
+// "<script>\n"
+// "document.getElementById(\"mitm-chatbot-input\").addEventListener(\"keydown\", async function(e) {\n"
+// "  if (e.key !== \"Enter\") return;\n"
+// "  let msg = this.value;\n"
+// "  this.value = \"\";\n"
+// "  let box = document.getElementById(\"mitm-chatbot-reply\");\n"
+// "  box.innerHTML += \"<div><b>You:</b> \" + msg + \"</div>\";\n"
+// "\n"
+// "  let resp = await fetch(\"http://localhost:9450/query\", {\n"
+// "    method: \"POST\",\n"
+// "    headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"888\" },\n"
+// "    body: JSON.stringify({ query: msg })\n"
+// "  });\n"
+// "  let data = await resp.json();\n"
+// "  box.innerHTML += \"<div><b>Bot:</b> \" + data.text + \"</div>\";\n"
+// "  box.scrollTop = box.scrollHeight;\n"
+// "});\n"
+// "</script>\n";
+
 // phases describing proxy state machine
 enum ReadPhase {
     // shared states
@@ -80,6 +106,10 @@ struct Connection {
     unsigned int html_offset;
     unsigned int LLM_buf_capacity;
     bool is_html;
+
+    // store original headers for HTML (to recalculate Content-Length)
+    char *response_headers;
+    int response_headers_len;
 
     // for chunked decoding
     char *chunked_decode_buf;
@@ -292,6 +322,200 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+// Generate chatbot snippet with actual client FD
+char *generate_chatbot_snippet(int client_fd) {
+    // Allocate buffer - should be plenty for the HTML + script
+    char *snippet = malloc(2048);
+    if (!snippet) return NULL;
+    
+    snprintf(snippet, 2048,
+"<div id=\"mitm-chatbot-box\" style=\"\n"
+" position: fixed;\n"
+" bottom: 20px;\n"
+" right: 20px;\n"
+" width: 260px;\n"
+" background: white;\n"
+" border: 2px solid #333;\n"
+" padding: 10px;\n"
+" z-index: 999999;\n"
+" box-shadow: 0px 0px 10px rgba(0,0,0,0.4);\n"
+" font-family: sans-serif;\">\n"
+" <div style=\"font-weight: bold; margin-bottom: 8px;\">Chatbot</div>\n"
+" <div id=\"mitm-chatbot-reply\" style=\"height: 80px; overflow-y: auto; border: 1px solid #ccc; padding: 6px; margin-bottom: 8px;\"></div>\n"
+" <input id=\"mitm-chatbot-input\" type=\"text\" style=\"width: 100%%; padding: 6px; box-sizing: border-box;\" placeholder=\"Say hello...\"/>\n"
+"</div>\n"
+"\n"
+"<script>\n"
+"document.getElementById(\"mitm-chatbot-input\").addEventListener(\"keydown\", async function(e) {\n"
+" if (e.key !== \"Enter\") return;\n"
+" let msg = this.value;\n"
+" this.value = \"\";\n"
+" let box = document.getElementById(\"mitm-chatbot-reply\");\n"
+" box.innerHTML += \"<div><b>You:</b> \" + msg + \"</div>\";\n"
+"\n"
+" let resp = await fetch(\"http://localhost:9450/query\", {\n"
+"  method: \"POST\",\n"
+"  headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"%d\" },\n"
+"  body: JSON.stringify({ query: msg })\n"
+" });\n"
+" let data = await resp.json();\n"
+" box.innerHTML += \"<div><b>Bot:</b> \" + data.text + \"</div>\";\n"
+" box.scrollTop = box.scrollHeight;\n"
+"});\n"
+"</script>\n",
+    client_fd);
+    
+    return snippet;
+}
+
+
+// Update Content-Length header in stored response headers
+// Removes compressed header field
+// Returns modified headers string (caller must free)
+char *update_content_length_header(const char *headers, int headers_len, int new_content_len) {
+    char *temp = malloc(headers_len + 100);  // Extra space for safety
+    memcpy(temp, headers, headers_len);
+    temp[headers_len] = '\0';
+    
+    int current_len = headers_len;
+    
+    // Remove Content-Encoding line if present
+    char *ce_start = strstr(temp, "Content-Encoding:");
+    if (ce_start) {
+        char *ce_end = strstr(ce_start, "\r\n");
+        if (ce_end) {
+            // Calculate how much to remove (including \r\n)
+            int remove_len = (ce_end + 2) - ce_start;
+            // Move everything after this line forward
+            memmove(ce_start, ce_end + 2, strlen(ce_end + 2) + 1);
+            current_len -= remove_len;
+            temp[current_len] = '\0';
+        }
+    }
+    
+    // Change "Connection: close" to "Connection: keep-alive" if present
+    char *conn_close = strstr(temp, "Connection: close");
+    if (conn_close) {
+        memcpy(conn_close + 12, "keep-alive", 10);  // Overwrite "close" with "keep-alive"
+    }
+    
+    // Find and update Content-Length line
+    char *cl_start = strstr(temp, "Content-Length:");
+    if (!cl_start) {
+        free(temp);
+        return strdup(headers);
+    }
+    
+    // Find the end of the Content-Length line
+    char *cl_end = strstr(cl_start, "\r\n");
+    if (!cl_end) {
+        free(temp);
+        return strdup(headers);
+    }
+    
+    // Build new header with updated Content-Length
+    int before_len = cl_start - temp;
+    char *after_cl = cl_end;  // Start of what comes after CL line
+    
+    char new_cl_line[128];
+    snprintf(new_cl_line, sizeof(new_cl_line), "Content-Length: %d", new_content_len);
+    
+    // Calculate new total length
+    int after_len = current_len - (cl_end - temp);
+    int new_headers_len = before_len + strlen(new_cl_line) + after_len;
+    
+    char *new_headers = malloc(new_headers_len + 1);
+    
+    // Copy: before CL line + new CL line + after CL line
+    memcpy(new_headers, temp, before_len);
+    memcpy(new_headers + before_len, new_cl_line, strlen(new_cl_line));
+    memcpy(new_headers + before_len + strlen(new_cl_line), after_cl, after_len);
+    new_headers[new_headers_len] = '\0';
+    
+    free(temp);
+    return new_headers;
+}
+
+// inject CHATBOT_SNIPPET after <body tag in HTML content
+// returns allocated buffer with injected content, or NULL on failure
+// caller must free the returned buffer
+char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int client_fd) {
+    // Generate snippet with actual FD
+    char *CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd);
+    if (!CHATBOT_SNIPPET) return NULL;
+    
+    // find <body tag (case-insensitive, could be <body>, <body attr="...">)
+    const char *body_tag = NULL;
+    for (int i = 0; i < html_len - 5; i++) {
+        if (html[i] == '<' &&
+            (html[i+1] == 'b' || html[i+1] == 'B') &&
+            (html[i+2] == 'o' || html[i+2] == 'O') &&
+            (html[i+3] == 'd' || html[i+3] == 'D') &&
+            (html[i+4] == 'y' || html[i+4] == 'Y') &&
+            (html[i+5] == '>' || html[i+5] == ' ' || html[i+5] == '\t' || html[i+5] == '\n' || html[i+5] == '\r')) {
+            body_tag = html + i;
+            break;
+        } 
+    }
+    
+    const char *insert_point = NULL;
+    int snippet_insert_offset = -1;
+    
+    if (body_tag) {
+        insert_point = strchr(body_tag, '>');
+        if (!insert_point) {
+            fprintf(stderr, "ERROR: Incorect <body> tag\n");
+            free(CHATBOT_SNIPPET);
+            return NULL;
+        }
+        snippet_insert_offset = insert_point - html + 1;
+        fprintf(stderr, "DEBUG: Found <body> tag at offset %ld\n", body_tag - html);
+    } else {
+        for (int i = html_len - 10; i >= 0; i--) {
+            if ((html[i] == '<' || html[i] == '<') &&
+                (html[i+1] == '/' || html[i+1] == '/') &&
+                (html[i+2] == 'h' || html[i+2] == 'H') &&
+                (html[i+3] == 't' || html[i+3] == 'T') &&
+                (html[i+4] == 'm' || html[i+4] == 'M') &&
+                (html[i+5] == 'l' || html[i+5] == 'L') &&
+                (html[i+6] == '>' || html[i+6] == '>')) {
+                snippet_insert_offset = i;
+                fprintf(stderr, "DEBUG: Found </html> tag at offset %d, injecting before it\n", i);
+                break;
+            }
+        }
+    }
+    
+    if (snippet_insert_offset < 0) {
+        fprintf(stderr, "DEBUG: No <body> or </html> tag found, appending at end\n");
+        snippet_insert_offset = html_len;
+    }
+    
+    int snippet_len = strlen(CHATBOT_SNIPPET);
+    int before_len = snippet_insert_offset;
+    int after_len = html_len - snippet_insert_offset;
+    
+    int new_len = before_len + snippet_len + after_len;
+    char *injected = malloc(new_len + 1);
+    if (!injected) {
+        fprintf(stderr, "ERROR: malloc failed for injected HTML\n");
+        free(CHATBOT_SNIPPET);
+        return NULL;
+    }
+    
+    memcpy(injected, html, before_len);
+    memcpy(injected + before_len, CHATBOT_SNIPPET, snippet_len);
+    memcpy(injected + before_len + snippet_len, html + snippet_insert_offset, after_len);
+    injected[new_len] = '\0';
+    
+    fprintf(stderr, "DEBUG: Injected chatbot (original=%d, injected=%d, insert_offset=%d, client_fd=%d)\n", 
+            html_len, new_len, snippet_insert_offset, client_fd);
+
+    free(CHATBOT_SNIPPET);  // Free the generated snippet
+    *out_len = new_len;
+    return injected;
+}
+
 bool send_to_llm(struct Connection *conn, int llm_port) {
     if (!conn->is_html || conn->html_offset == 0) {
         return true;
@@ -305,14 +529,14 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         }
     }
     
-    // Create a NEW socket for EACH request
+    // Create socket
     int llm_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (llm_fd < 0) {
         perror("Failed to create LLM socket");
         return false;
     }
     
-    // Connect to Flask (localhost:9450)
+    // Connect to Flask
     struct sockaddr_in llm_addr;
     memset(&llm_addr, 0, sizeof(llm_addr));
     llm_addr.sin_family = AF_INET;
@@ -325,40 +549,39 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         return false;
     }
     
-    // Build JSON payload
-    char json_payload[BUFFER_SIZE * 2];
-    snprintf(json_payload, sizeof(json_payload),
-             "{\"html\":\"%.*s\"}",
-             conn->html_offset, conn->LLM_buf);
-    
-    // Build HTTP POST request
-    char request[BUFFER_SIZE * 3];
-    int content_len = strlen(json_payload);
-    snprintf(request, sizeof(request),
+    // Build HTTP POST request header (send raw HTML, not JSON)
+    char header[1024];
+    snprintf(header, sizeof(header),
              "POST /upload_html HTTP/1.1\r\n"
              "Host: 127.0.0.1:%d\r\n"
              "Client-FD: %d\r\n"
-             "Content-Type: application/json\r\n"
+             "Content-Type: text/html\r\n"
              "Content-Length: %d\r\n"
              "Connection: close\r\n"
-             "\r\n"
-             "%s",
-             llm_port, conn->client_fd, content_len, json_payload);
+             "\r\n",
+             llm_port, 888, conn->html_offset); // TODO: change to client_fd
     
-    // Send the request
-    int sent = write(llm_fd, request, strlen(request));
+    // Send header
+    int sent = write(llm_fd, header, strlen(header));
     if (sent < 0) {
-        perror("Failed to send to Flask");
+        perror("Failed to send header to Flask");
         close(llm_fd);
         return false;
     }
     
-    fprintf(stderr, "Sent %d bytes to Flask\n", sent);
+    // Send HTML body directly (no JSON encoding needed!)
+    sent = write(llm_fd, conn->LLM_buf, conn->html_offset);
+    if (sent < 0) {
+        perror("Failed to send body to Flask");
+        close(llm_fd);
+        return false;
+    }
+    
+    fprintf(stderr, "Sent %d bytes HTML to Flask (fd=%d)\n", conn->html_offset, conn->client_fd);
     
     close(llm_fd);
     return true;
 }
-
 // int get_LLM_fd() {
 //     // create listening socket
 //     int llm_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -384,7 +607,7 @@ void buffer_append(struct Connection *conn, char *to_add, int len) {
     if (len + conn->html_offset >= conn->LLM_buf_capacity) {
         // double until required capacity is reached
         int new_capacity = conn->LLM_buf_capacity;
-        while (len + conn->html_offset >= conn->LLM_buf_capacity) {
+        while (len + conn->html_offset >= new_capacity) {
             new_capacity *= 2;
         }
 
@@ -947,33 +1170,6 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
 
     // inject X-Proxy header into response
     if (!conn->header_injected) {
-        const char *injection = "X-Proxy:CS112\r\n\r\n";
-        int injection_len = strlen(injection);
-        int inject_point = headers_len - 2;
-
-        if (conn->is_https) {
-            bool should_retry;
-            if (ssl_write_with_retry(conn->client_ssl, conn->buf, inject_point, &should_retry) < 0) return false;
-            if (should_retry) return true;
-           
-            if (ssl_write_with_retry(conn->client_ssl, injection, injection_len, &should_retry) < 0) return false;
-            if (should_retry) return true;
-           
-            if (remaining_body > 0) {
-                if (ssl_write_with_retry(conn->client_ssl, conn->buf + body_offset, remaining_body, &should_retry) < 0) return false;
-                if (should_retry) return true;
-            }
-        } else {
-            write(conn->client_fd, conn->buf, inject_point);
-            write(conn->client_fd, injection, injection_len);
-           
-            if (remaining_body > 0) {
-                write(conn->client_fd, conn->buf + body_offset, remaining_body);
-            }
-        }
-
-        conn->header_injected = true;
-       
         // parse headers to determine body length
         char original_char = conn->buf[headers_len];
         conn->buf[headers_len] = '\0';
@@ -986,13 +1182,64 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
         conn->is_html = is_html;
         conn->is_compressed = is_compressed;
 
+        fprintf(stderr, "DEBUG: Parsed headers - is_html=%d, content_length=%d, is_chunked=%d, is_compressed=%d\n",
+        is_html, conn->content_length, is_chunked, is_compressed);
+
         free(header_copy);
         conn->buf[headers_len] = original_char;
+
+        const char *injection = "X-Proxy:CS112\r\n\r\n";
+        int injection_len = strlen(injection);
+        int inject_point = headers_len - 2;
+
+        // For HTML responses, don't send headers yet - we'll send them when we inject the chatbot
+        // For other responses, send headers immediately
+        if (!conn->is_html) {
+            if (conn->is_https) {
+                bool should_retry;
+                if (ssl_write_with_retry(conn->client_ssl, conn->buf, inject_point, &should_retry) < 0) return false;
+                if (should_retry) return true;
+               
+                if (ssl_write_with_retry(conn->client_ssl, injection, injection_len, &should_retry) < 0) return false;
+                if (should_retry) return true;
+               
+                if (remaining_body > 0) {
+                    if (ssl_write_with_retry(conn->client_ssl, conn->buf + body_offset, remaining_body, &should_retry) < 0) return false;
+                    if (should_retry) return true;
+                }
+            } else {
+                write(conn->client_fd, conn->buf, inject_point);
+                write(conn->client_fd, injection, injection_len);
+               
+                if (remaining_body > 0) {
+                    write(conn->client_fd, conn->buf + body_offset, remaining_body);
+                }
+            }
+        }
+
+        conn->header_injected = true;
         conn->body_bytes_read = remaining_body;
 
-        if (conn->is_html && remaining_body > 0){
-            buffer_append(conn, conn->buf + body_offset, remaining_body);
+        // If HTML, store headers so we can update Content-Length later
+        if (conn->is_html) {
+            conn->response_headers = malloc(headers_len + 1);
+            memcpy(conn->response_headers, conn->buf, headers_len);
+            conn->response_headers_len = headers_len;
+            conn->response_headers[headers_len] = '\0';
+            fprintf(stderr, "DEBUG: Stored headers for HTML response (len=%d), is_chunked=%d\n", headers_len, is_chunked);
+            
+            // For HTML, buffer the initial body data, don't forward yet
+            if (remaining_body > 0) {
+                buffer_append(conn, conn->buf + body_offset, remaining_body);
+                fprintf(stderr, "DEBUG: Buffered initial body chunk (%d bytes)\n", remaining_body);
+            }
+        } else {
+            // For non-HTML, forward body immediately
+            if (remaining_body > 0) {
+                write(conn->client_fd, conn->buf + body_offset, remaining_body);
+            }
         }
+        
         conn->offset = 0;        
     }
 
@@ -1014,6 +1261,72 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
         conn->phase = READING_RESPONSE_BODY;
     }
 
+    // At the very end of read_response_header, after setting conn->phase
+
+    // Check if body is already complete
+    if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
+        fprintf(stderr, "DEBUG: Body already complete in header phase!\n");
+        
+        if (conn->is_html && conn->html_offset > 0) {
+            // Do injection immediately
+            fprintf(stderr, "DEBUG: Doing immediate injection from header phase\n");
+            
+            // Decompress if needed
+            if (conn->is_compressed) {
+                if (!decompress_and_store(conn)) {
+                    fprintf(stderr, "ERROR: Failed to decompress HTML\n");
+                } else {
+                    conn->is_compressed = false;
+                }
+            }
+            
+            // Inject chatbot
+            int injected_len = 0;
+            char *injected_html = inject_chatbot_into_html(conn->LLM_buf, conn->html_offset, &injected_len, conn->client_fd);
+            
+            if (injected_html && conn->response_headers) {
+                char *updated_headers = update_content_length_header(conn->response_headers, conn->response_headers_len, injected_len);
+                const char *injection = "X-Proxy:CS112\r\n\r\n";
+                int headers_without_end = strlen(updated_headers) - 4;
+                
+                int written = write(conn->client_fd, updated_headers, headers_without_end);
+                fprintf(stderr, "DEBUG: Wrote headers: %d bytes (expected %d)\n", written, headers_without_end);
+                if (written < 0) {
+                    fprintf(stderr, "ERROR: Failed to write headers: %s\n", strerror(errno));
+                }
+                
+                written = write(conn->client_fd, injection, strlen(injection));
+                fprintf(stderr, "DEBUG: Wrote injection: %d bytes\n", written);
+                if (written < 0) {
+                    fprintf(stderr, "ERROR: Failed to write injection: %s\n", strerror(errno));
+                }
+                
+                written = write(conn->client_fd, injected_html, injected_len);
+                fprintf(stderr, "DEBUG: Wrote body: %d bytes (expected %d)\n", written, injected_len);
+                if (written < 0) {
+                    fprintf(stderr, "ERROR: Failed to write body: %s\n", strerror(errno));
+                }
+                
+                // ADD THIS: Verify total bytes sent
+                fprintf(stderr, "DEBUG: Total sent should be: %d + %zu + %d = %d bytes\n",
+                        headers_without_end, strlen(injection), injected_len,
+                        headers_without_end + (int)strlen(injection) + injected_len);
+                
+                fprintf(stderr, "DEBUG: Injected chatbot from header phase\n");
+                
+                free(updated_headers);
+                free(injected_html);
+                
+                send_to_llm(conn, 9450);
+                
+                // Reset
+                conn->html_offset = 0;
+                conn->is_html = false;
+                return false;  // Close connection
+            }
+        }
+    }
+
     return true;
 }
 
@@ -1029,40 +1342,186 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
         if (should_retry) return true;
         if (n < 0) return false;
     } else {
-        n = read(fd, conn->buf, BUFFER_SIZE);
-       
+        // ADD THIS: Only read up to content_length if we know it
+        int to_read = BUFFER_SIZE;
+        if (conn->content_length > 0) {
+            int remaining = conn->content_length - conn->body_bytes_read;
+            if (remaining < to_read) {
+                to_read = remaining;  // Don't read past the end of this response
+            }
+        }
+        
+        n = read(fd, conn->buf, to_read);  // Changed from BUFFER_SIZE to to_read
+    
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) return true;
             return false;
         }
     }
 
-    if (n == 0) return false;
+    if (n == 0) {
+        // Connection closed - for chunked responses, this triggers completion
+        fprintf(stderr, "DEBUG: Connection closed, is_html=%d, html_offset=%d\n", conn->is_html, conn->html_offset);
+        
+        if (conn->is_html && conn->html_offset > 0) {
+            fprintf(stderr, "DEBUG: Processing HTML response on connection close\n");
+            goto do_injection;
+        }
+        return false;
+    }
        
     conn->body_bytes_read += n;
 
-    // forward body data to client
-    if (conn->is_https) {
-        bool should_retry;
-        int written = ssl_write_with_retry(conn->client_ssl, conn->buf, n, &should_retry);
-        if (should_retry) return true;
-        if (written < 0) return false;
-    } else {
-        int written = write(conn->client_fd, conn->buf, n);
-        if (written < 0) return false;
-    }
-
+    // accumulate body data for HTML (don't forward yet if HTML)
     if (conn->is_html) {
+        fprintf(stderr, "DEBUG: About to append %d bytes. First 50: %.50s\n", n, conn->buf);
         buffer_append(conn, conn->buf, n);
+        fprintf(stderr, "DEBUG: Accumulated %d bytes, total=%d\n", n, conn->html_offset);
+    } else {
+        // forward non-HTML body immediately
+        if (conn->is_https) {
+            bool should_retry;
+            int written = ssl_write_with_retry(conn->client_ssl, conn->buf, n, &should_retry);
+            if (should_retry) return true;
+            if (written < 0) return false;
+        } else {
+            int written = write(conn->client_fd, conn->buf, n);
+            if (written < 0) return false;
+        }
     }
 
     // check if response body is complete
     if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
-        send_and_reset_html(conn, llm_fd);
-        return false;
+        fprintf(stderr, "DEBUG: Fixed Content-Length response complete\n");
+        goto do_injection;
     }
 
+
     return true;
+
+do_injection:
+    {
+        fprintf(stderr, "DEBUG: Buffer before injection - last 100 chars:\n");
+        int start = (conn->html_offset > 100) ? conn->html_offset - 100 : 0;
+        for (int i = start; i < conn->html_offset; i++) {
+            if (conn->LLM_buf[i] >= 32 && conn->LLM_buf[i] <= 126) {
+                fprintf(stderr, "%c", conn->LLM_buf[i]);
+            } else {
+                fprintf(stderr, "[0x%02X]", (unsigned char)conn->LLM_buf[i]);
+            }
+        }
+        fprintf(stderr, "\n");
+
+        fprintf(stderr, "DEBUG: At do_injection label - is_html=%d, html_offset=%d\n", 
+                conn->is_html, conn->html_offset);
+
+        // response complete - inject chatbot
+
+        if (conn->is_html && conn->html_offset > 0) {
+            fprintf(stderr, "DEBUG: HTTP HTML body complete (len=%d)\n", conn->html_offset);
+            fprintf(stderr, "DEBUG: HTML snippet: %.300s\n", conn->LLM_buf);
+            
+            // decompress if needed
+            if (conn->is_compressed) {
+                if (!decompress_and_store(conn)) {
+                    fprintf(stderr, "ERROR: Failed to decompress HTML\n");
+                } else {
+                    conn->is_compressed = false;
+                }
+            }
+            
+            // inject chatbot into HTML
+            int injected_len = 0;
+            char *injected_html = inject_chatbot_into_html(conn->LLM_buf, conn->html_offset, &injected_len, conn->client_fd);
+            
+            if (injected_html) {
+                fprintf(stderr, "DEBUG: Successfully injected chatbot, forwarding modified HTML (original=%d, injected=%d)\n", 
+                    conn->html_offset, injected_len);
+                
+                // For HTML, we need to send headers now with correct Content-Length
+                if (conn->response_headers) {
+                    // Update Content-Length and send headers
+                    char *updated_headers = update_content_length_header(conn->response_headers, conn->response_headers_len, injected_len);
+                    const char *injection = "X-Proxy:CS112\r\n\r\n";
+
+                    fprintf(stderr, "DEBUG: Original headers:\n%.*s\n", conn->response_headers_len, conn->response_headers);
+                    fprintf(stderr, "DEBUG: Updated headers:\n%s\n", updated_headers);
+                    fprintf(stderr, "DEBUG: Updated Content-Length should be: %d\n", injected_len);
+                    
+                    int headers_without_end = strlen(updated_headers) - 4;
+                    
+                    fprintf(stderr, "DEBUG: About to write - headers_len=%d, injection_len=%zu, body_len=%d\n",
+                            headers_without_end, strlen(injection), injected_len);
+                    
+                    int written = write(conn->client_fd, updated_headers, headers_without_end);
+                    fprintf(stderr, "DEBUG: Wrote headers: %d bytes (expected %d)\n", written, headers_without_end);
+                    
+                    if (written < 0) {
+                        fprintf(stderr, "ERROR: Failed to write headers: %s\n", strerror(errno));
+                        free(updated_headers);
+                        free(injected_html);
+                        return false;
+                    }
+                    
+                    written = write(conn->client_fd, injection, strlen(injection));
+                    fprintf(stderr, "DEBUG: Wrote injection: %d bytes\n", written);
+                    
+                    if (written < 0) {
+                        fprintf(stderr, "ERROR: Failed to write injection: %s\n", strerror(errno));
+                        free(updated_headers);
+                        free(injected_html);
+                        return false;
+                    }
+
+                    fprintf(stderr, "BODY:%s\n", injected_html);
+                    
+                    written = write(conn->client_fd, injected_html, injected_len);
+                    fprintf(stderr, "DEBUG: Wrote body: %d bytes (expected %d)\n", written, injected_len);
+                    
+                    if (written < 0) {
+                        fprintf(stderr, "ERROR: Failed to write body: %s\n", strerror(errno));
+                        free(updated_headers);
+                        free(injected_html);
+                        return false;
+                    }
+                    
+                    fprintf(stderr, "DEBUG: Successfully sent all data\n");
+                    
+                    free(updated_headers);
+                    free(injected_html);
+                } else {
+                    fprintf(stderr, "ERROR: No response_headers stored!\n");
+                    free(injected_html);
+                    return false;
+                }
+            } else {
+                // injection failed, forward original HTML
+                fprintf(stderr, "WARNING: Failed to inject chatbot, forwarding original HTML\n");
+                
+                // Need to send headers first if we have them
+                if (conn->response_headers) {
+                    write(conn->client_fd, conn->response_headers, conn->response_headers_len);
+                }
+                
+                int written = write(conn->client_fd, conn->LLM_buf, conn->html_offset);
+                if (written < 0) return false;
+            }
+            
+            // send to Flask for analysis
+            send_to_llm(conn, 9450);
+        } else if (conn->is_html) {
+            fprintf(stderr, "WARNING: HTML flag set but no content accumulated\n");
+        }
+        
+        // reset HTML buffer for next response
+        conn->html_offset = 0;
+        conn->is_html = false;
+        conn->is_compressed = false;
+
+        memset(conn->LLM_buf, 0, conn->LLM_buf_capacity);
+        
+        return false;
+    }
 }
 
 // parse HTTP response headers to extract content-length and transfer-encoding
@@ -1421,6 +1880,9 @@ struct Connection *Connection_create(int client_fd) {
     new_conn->LLM_buf_capacity = HTML_BUFFER_SIZE;
     new_conn->is_html = false;
     
+    new_conn->response_headers = NULL;
+    new_conn->response_headers_len = 0;
+    
     new_conn->is_compressed = false;
     new_conn->chunked_decode_buf = NULL;
     new_conn->chunked_decode_capacity = 0;
@@ -1607,7 +2069,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                 if (written < 0) return false;
 
                 if (conn->is_html) {
-                    // add to LLM buffer
+                    // accumulate HTML for analysis (don't inject in tunnel for now)
                     buffer_append(conn, conn->tunnel_buf, to_forward);
                 }
                 
@@ -1698,50 +2160,19 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
     return true;
 }
 
-// send HTML buffer, decompressing if needed, then reset state
+// send HTML buffer to Flask for analysis, then reset state
 void send_and_reset_html(struct Connection *conn, int llm_fd) {
     if (!conn->is_html || conn->html_offset == 0) {
         return;
     }
 
+    // HTML should already be decompressed at this point
     send_to_llm(conn, 9450);
-    
-    // // decompress if needed
-    // if (conn->is_compressed) {
-    //     if (!decompress_and_store(conn)) {
-    //         fprintf(stderr, "ERROR: Failed to decompress HTML\n");
-    //         conn->html_offset = 0;
-    //         conn->is_html = false;
-    //         conn->is_compressed = false;
-    //         return;
-    //     }
-    //     fprintf(stderr, "DEBUG: Decompression successful, new size=%d\n", conn->html_offset);
-    // }
-    
-    // // null terminate and print -> TODO: SEND TO LLM
-    // buffer_append(conn, "\0", 1);
-    // char request[BUFFER_SIZE];
-    // snprintf(request, sizeof(request),
-    //          "POST /upload_html HTTP/1.1\r\n"
-    //          "Client fd: %d\r\n"
-    //          "Host: %s:%d\r\n"
-    //          "Content-Type: application/json\r\n"
-    //          "Content-Length: %zu\r\n"
-    //          "Connection: close\r\n"
-    //          "\r\n"
-    //          "%s",
-    //          conn->client_fd, conn->hostname, conn->target_port, conn->html_offset, conn->LLM_buf);
-    
-    // write(llm_fd, request, strlen(request));
 
     // clean up
     conn->html_offset = 0;
     conn->is_html = false;
     conn->is_compressed = false;
-
-    fprintf(stderr, "LLM BODY:\n");
-    fprintf(stderr, "%s\n", conn->LLM_buf);
-
 }
 
 // clean up and close a connection
@@ -1796,6 +2227,7 @@ void close_connection(struct Connection **conn_ptr, fd_set *all_fds) {
     free(conn->hostname);
     free(conn->target_port);
     free(conn->chunked_decode_buf);
+    free(conn->response_headers);
 
     free(conn);
     *conn_ptr = NULL;
