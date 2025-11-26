@@ -1,5 +1,5 @@
 from typing import Optional, Union, List, Dict, Any
-
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from llmproxy import generate, text_upload, retrieve
 
@@ -20,13 +20,32 @@ def process():
     if not html:
         return jsonify({"error": "No HTML content"}), 400
     
+    # HTML parser
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Remove scripts, styles, navigation, etc.
+    for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+        tag.decompose()
+
+    # Get main content text
+    text = soup.get_text(separator='\n', strip=True)
+    
+    # Remove excessive whitespace
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    cleaned_text = '\n'.join(lines)
+    
+    # get text
+    print(f"Cleaned text: {cleaned_text}")
+    
     client_fd = request.headers.get('Client-FD', 'unknown')
     session_id = f"client_{client_fd}"
 
-    # llm does stuff
-    response = text_upload(text=html, strategy='smart', session_id=session_id, description='HTML page')
+    print(f"DEBUG UPLOAD: session_id={session_id}, client_fd={client_fd}, html_length={len(html)}")
 
-    print(response)
+    # llm does stuff
+    response = text_upload(text=cleaned_text, strategy='smart', session_id=session_id, description='Text of HTML page')
+
+    print(f"DEBUG UPLOAD RESPONSE: {response}")
 
     return jsonify({"status": "success", "response": response})
     
@@ -41,6 +60,8 @@ def query():
     client_fd = request.headers.get('Client-FD', 'unknown')
     session_id = f"client_{client_fd}"
 
+    print(f"DEBUG: Query for session_id={session_id}, client_fd={client_fd}")
+
     # retrieve relevant chunks from the session
     context_chunks = retrieve(
         query=user_query,
@@ -49,18 +70,29 @@ def query():
         rag_k=5  # get top 5 relevant chunks
     )
 
+    if not context_chunks:
+        print("DEBUG: No chunks retrieved!")
+        return jsonify({"text": "Your document is still being processed. Please try your query again shortly."})
+
     # combine chunks into a single prompt
     context_text = ""
     for chunk in context_chunks:
-        for c in chunk["chunks"]:
-            context_text += c + "\n"
+        if isinstance(chunk, dict) and "chunks" in chunk:
+            for c in chunk["chunks"]:
+                context_text += str(c) + "\n"
 
-    prompt = f"Use the following HTML content to answer the question:\n{context_text}\nQuestion: {user_query}"
+    print(f"DEBUG: Final context_text length: {len(context_text)}")
+    print(f"DEBUG: Context preview: {context_text[:500]}")
+
+    if not context_text.strip():
+        return jsonify({"text": "No context found. Document may still be processing."})
+    
+    prompt = f"Context:\n{context_text}\n\nQuestion: {user_query}"
 
     # call generate with the context
     response = generate(
         model='4o-mini',
-        system="Answer based on the provided HTML content. Ignore styling/scripts. If there are multiple HTML pages uploaded to the session and the user does not specify which they are talking about in the query, use the most recent one.",
+        system="You will receive the text of an HTML page. Answer user queries based on it. If no context is found, inform the user.",
         query=prompt,
         temperature=0.0,
         lastk=0,
@@ -73,9 +105,7 @@ def query():
 
 # curl -X POST http://127.0.0.1:9450/upload_html      -H "Content-Type: application/json"      -d '{"html": "<html><body><h1>Hello from curl</h1></body></html>"}'
 
-# curl -X POST http://127.0.0.1:9450/query -H "Content-Type: application/json" -d '{"query": "summarize the HTML of this page"}'
-
+# curl -X POST http://127.0.0.1:9450/query -H "Content-Type: application/json" -H "Client-FD: 123" -d '{"query": "summarize the page in one paragraph, at a fifth grade level"}'
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9450)
-
