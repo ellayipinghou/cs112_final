@@ -84,6 +84,7 @@ struct Connection {
     // store original headers for HTML (to recalculate Content-Length)
     char *response_headers;
     int response_headers_len;
+    bool header_sent_to_client;
 
     // for chunked decoding
     char *chunked_decode_buf;
@@ -1436,6 +1437,193 @@ char *find_body_tag(char *buf, int len) {
     return NULL;
 }
 
+// bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
+//     struct Connection *conn = fd_to_connection[fd];
+//     if (!conn) return false;
+
+//     int n;
+//     if (conn->is_https) {
+//         bool should_retry;
+//         n = ssl_read_with_retry(conn->server_ssl, conn->buf, BUFFER_SIZE, &should_retry);
+//         if (should_retry) return true;
+//         if (n < 0) return false;
+//     } else {
+//         int to_read = BUFFER_SIZE;
+//         if (conn->content_length > 0) {
+//             int remaining = conn->content_length - conn->body_bytes_read;
+//             if (remaining < to_read) {
+//                 to_read = remaining;
+//             }
+//         }
+        
+//         n = read(fd, conn->buf, to_read);
+    
+//         if (n < 0) {
+//             if (errno == EAGAIN || errno == EWOULDBLOCK) return true;
+//             return false;
+//         }
+//     }
+
+//     if (n == 0) {
+//         // Connection closed
+//         if (conn->is_html && conn->html_offset > 0 && !conn->chatbot_injected) {
+//             // Send buffered data with headers
+//             if (conn->response_headers) {
+//                 const char *injection = "X-Proxy:CS112\r\n\r\n";
+//                 int headers_without_end = conn->response_headers_len - 4;
+//                 write(conn->client_fd, conn->response_headers, headers_without_end);
+//                 write(conn->client_fd, injection, strlen(injection));
+//             }
+//             write(conn->client_fd, conn->LLM_buf, conn->html_offset);
+//         }
+        
+//         if (conn->is_html && conn->html_offset > 0) {
+//             send_to_llm(conn, 9450);
+//         }
+        
+//         // Cleanup decompressor
+//         if (conn->gzip_stream) {
+//             inflateEnd(conn->gzip_stream);
+//             free(conn->gzip_stream);
+//             conn->gzip_stream = NULL;
+//         }
+//         if (conn->brotli_state) {
+//             BrotliDecoderDestroyInstance(conn->brotli_state);
+//             conn->brotli_state = NULL;
+//         }
+        
+//         return false;
+//     }
+       
+//     conn->body_bytes_read += n;
+
+//     // === STREAMING LOGIC ===
+//     if (conn->is_html) {
+//         char *data_to_process = conn->buf;
+//         int data_len = n;
+        
+//         // If compressed, decompress this chunk first
+//         if (conn->is_compressed) {
+//             if (!conn->decompression_initialized) {
+//                 if (!init_streaming_decompressor(conn, (unsigned char *)conn->buf, n)) {
+//                     fprintf(stderr, "ERROR: Failed to init decompressor\n");
+//                     conn->is_compressed = false; // Fall back to treating as uncompressed
+//                     conn->is_html = false;
+//                     write(conn->client_fd, conn->buf, n);
+//                     return true;
+//                 }
+//             }
+            
+//             // Decompress this chunk
+//             int decompressed_len = decompress_chunk(conn, conn->buf, n, 
+//                                                    conn->decompress_buffer, BUFFER_SIZE);
+            
+//             if (decompressed_len < 0) {
+//                 fprintf(stderr, "ERROR: Decompression failed\n");
+//                 conn->is_html = false;
+//                 write(conn->client_fd, conn->buf, n);
+//                 return true;
+//             }
+            
+//             if (decompressed_len == 0) {
+//                 // No output yet, need more input
+//                 return true;
+//             }
+            
+//             data_to_process = conn->decompress_buffer;
+//             data_len = decompressed_len;
+            
+//             fprintf(stderr, "DEBUG: Decompressed %d -> %d bytes\n", n, decompressed_len);
+//         }
+        
+//         // Now process the (potentially decompressed) data
+//         if (!conn->chatbot_injected) {
+//             // Buffer and search for <body>
+//             buffer_append(conn, data_to_process, data_len);
+            
+//             char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
+
+//             if (body_pos) {
+//                 // Found <body>!
+//                 int before_body = body_pos - conn->LLM_buf;
+                
+//                 fprintf(stderr, "DEBUG: Found <body> at offset %d\n", before_body);
+                
+//                 // Send headers
+//                 if (conn->response_headers) {
+//                     const char *injection = "X-Proxy:CS112\r\n\r\n";
+//                     int headers_without_end = conn->response_headers_len - 4;
+//                     write(conn->client_fd, conn->response_headers, headers_without_end);
+//                     write(conn->client_fd, injection, strlen(injection));
+//                 }
+                
+//                 // Send before <body>
+//                 write(conn->client_fd, conn->LLM_buf, before_body);
+                
+//                 // Inject chatbot
+//                 char *snippet = generate_chatbot_snippet(conn->client_fd);
+//                 write(conn->client_fd, snippet, strlen(snippet));
+//                 free(snippet);
+                
+//                 // Send rest
+//                 int after_body = conn->html_offset - before_body;
+//                 write(conn->client_fd, body_pos, after_body);
+                
+//                 conn->chatbot_injected = true;
+//             }
+//             // else: keep buffering
+//         } else {
+//             // Already injected - forward decompressed data and accumulate
+//             write(conn->client_fd, data_to_process, data_len);
+//             buffer_append(conn, data_to_process, data_len);
+//         }
+//     } else {
+//         // Non-HTML: forward immediately
+//         write(conn->client_fd, conn->buf, n);
+//     }
+
+//     // Check if response is complete
+//     if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
+//         fprintf(stderr, "DEBUG: Response complete\n");
+        
+//         // If never injected, send buffered data now
+//         if (conn->is_html && conn->html_offset > 0 && !conn->chatbot_injected) {
+//             if (conn->response_headers) {
+//                 const char *injection = "X-Proxy:CS112\r\n\r\n";
+//                 int headers_without_end = conn->response_headers_len - 4;
+//                 write(conn->client_fd, conn->response_headers, headers_without_end);
+//                 write(conn->client_fd, injection, strlen(injection));
+//             }
+//             write(conn->client_fd, conn->LLM_buf, conn->html_offset);
+//         }
+        
+//         // Send to LLM
+//         if (conn->is_html && conn->html_offset > 0) {
+//             send_to_llm(conn, 9450);
+//         }
+        
+//         // Cleanup
+//         if (conn->gzip_stream) {
+//             inflateEnd(conn->gzip_stream);
+//             free(conn->gzip_stream);
+//             conn->gzip_stream = NULL;
+//         }
+//         if (conn->brotli_state) {
+//             BrotliDecoderDestroyInstance(conn->brotli_state);
+//             conn->brotli_state = NULL;
+//         }
+        
+//         conn->html_offset = 0;
+//         conn->is_html = false;
+//         conn->chatbot_injected = false;
+//         conn->decompression_initialized = false;
+        
+//         return false;
+//     }
+
+//     return true;
+// }
+
 bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) return false;
@@ -1464,9 +1652,8 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
     }
 
     if (n == 0) {
-        // Connection closed
+        // Connection closed - handle buffered data
         if (conn->is_html && conn->html_offset > 0 && !conn->chatbot_injected) {
-            // Send buffered data with headers
             if (conn->response_headers) {
                 const char *injection = "X-Proxy:CS112\r\n\r\n";
                 int headers_without_end = conn->response_headers_len - 4;
@@ -1496,7 +1683,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
        
     conn->body_bytes_read += n;
 
-    // === STREAMING LOGIC ===
+    // === STREAMING LOGIC WITH IMMEDIATE FORWARDING ===
     if (conn->is_html) {
         char *data_to_process = conn->buf;
         int data_len = n;
@@ -1506,14 +1693,13 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
             if (!conn->decompression_initialized) {
                 if (!init_streaming_decompressor(conn, (unsigned char *)conn->buf, n)) {
                     fprintf(stderr, "ERROR: Failed to init decompressor\n");
-                    conn->is_compressed = false; // Fall back to treating as uncompressed
+                    conn->is_compressed = false;
                     conn->is_html = false;
                     write(conn->client_fd, conn->buf, n);
                     return true;
                 }
             }
             
-            // Decompress this chunk
             int decompressed_len = decompress_chunk(conn, conn->buf, n, 
                                                    conn->decompress_buffer, BUFFER_SIZE);
             
@@ -1531,24 +1717,24 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
             
             data_to_process = conn->decompress_buffer;
             data_len = decompressed_len;
-            
-            fprintf(stderr, "DEBUG: Decompressed %d -> %d bytes\n", n, decompressed_len);
         }
         
-        // Now process the (potentially decompressed) data
+        // === KEY CHANGE: IMMEDIATE STREAMING ===
         if (!conn->chatbot_injected) {
-            // Buffer and search for <body>
+            // Add new data to buffer
             buffer_append(conn, data_to_process, data_len);
             
+            // Search for <body> in the ENTIRE accumulated buffer
             char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
             
             if (body_pos) {
                 // Found <body>!
                 int before_body = body_pos - conn->LLM_buf;
                 
-                fprintf(stderr, "DEBUG: Found <body> at offset %d\n", before_body);
+                fprintf(stderr, "DEBUG: Found <body> at offset %d (total buffered: %d)\n", 
+                        before_body, conn->html_offset);
                 
-                // Send headers
+                // Send headers first
                 if (conn->response_headers) {
                     const char *injection = "X-Proxy:CS112\r\n\r\n";
                     int headers_without_end = conn->response_headers_len - 4;
@@ -1556,7 +1742,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     write(conn->client_fd, injection, strlen(injection));
                 }
                 
-                // Send before <body>
+                // Send everything before <body>
                 write(conn->client_fd, conn->LLM_buf, before_body);
                 
                 // Inject chatbot
@@ -1564,15 +1750,48 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 write(conn->client_fd, snippet, strlen(snippet));
                 free(snippet);
                 
-                // Send rest
+                // Send everything after <body>
                 int after_body = conn->html_offset - before_body;
                 write(conn->client_fd, body_pos, after_body);
                 
                 conn->chatbot_injected = true;
+                
+                // Don't need to keep buffering the sent data
+                // Keep the buffer for LLM analysis though
+            } else {
+                // === OPTIMIZATION: Check if safe to forward ===
+                // We can forward data if we're confident <body> isn't split across chunks
+                
+                // Keep last 10 bytes in buffer (in case <body> is split)
+                const int SAFETY_MARGIN = 10;
+                
+                if (conn->html_offset > SAFETY_MARGIN) {
+                    int safe_to_send = conn->html_offset - SAFETY_MARGIN;
+                    
+                    // Send headers first time only
+                    if (!conn->header_sent_to_client) {
+                        if (conn->response_headers) {
+                            const char *injection = "X-Proxy:CS112\r\n\r\n";
+                            int headers_without_end = conn->response_headers_len - 4;
+                            write(conn->client_fd, conn->response_headers, headers_without_end);
+                            write(conn->client_fd, injection, strlen(injection));
+                        }
+                        conn->header_sent_to_client = true;
+                    }
+                    
+                    // Send the safe portion
+                    write(conn->client_fd, conn->LLM_buf, safe_to_send);
+                    
+                    fprintf(stderr, "DEBUG: Streamed %d bytes (keeping %d in buffer)\n", 
+                            safe_to_send, SAFETY_MARGIN);
+                    
+                    // Keep last SAFETY_MARGIN bytes in buffer
+                    memmove(conn->LLM_buf, conn->LLM_buf + safe_to_send, SAFETY_MARGIN);
+                    conn->html_offset = SAFETY_MARGIN;
+                }
             }
-            // else: keep buffering
         } else {
-            // Already injected - forward decompressed data and accumulate
+            // Already injected - forward immediately and accumulate for LLM
             write(conn->client_fd, data_to_process, data_len);
             buffer_append(conn, data_to_process, data_len);
         }
@@ -1585,9 +1804,9 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
     if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
         fprintf(stderr, "DEBUG: Response complete\n");
         
-        // If never injected, send buffered data now
+        // If never injected, send remaining buffered data
         if (conn->is_html && conn->html_offset > 0 && !conn->chatbot_injected) {
-            if (conn->response_headers) {
+            if (conn->response_headers && !conn->header_sent_to_client) {
                 const char *injection = "X-Proxy:CS112\r\n\r\n";
                 int headers_without_end = conn->response_headers_len - 4;
                 write(conn->client_fd, conn->response_headers, headers_without_end);
@@ -1616,6 +1835,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
         conn->is_html = false;
         conn->chatbot_injected = false;
         conn->decompression_initialized = false;
+        conn->header_sent_to_client = false;
         
         return false;
     }
@@ -1981,6 +2201,7 @@ struct Connection *Connection_create(int client_fd) {
     
     new_conn->response_headers = NULL;
     new_conn->response_headers_len = 0;
+    new_conn->header_sent_to_client = false;
     
     new_conn->is_compressed = false;
     new_conn->chunked_decode_buf = NULL;
