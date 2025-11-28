@@ -90,6 +90,9 @@ struct Connection {
     int chunked_decode_capacity;
     int chunked_decode_offset;
     bool is_compressed;
+
+    // url, for additional context to the LLM
+    char *url;
 };
 
 // global mapping from file descriptors to connections
@@ -529,11 +532,12 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
              "POST /upload_html HTTP/1.1\r\n"
              "Host: 127.0.0.1:%d\r\n"
              "Client-FD: %d\r\n"
+             "Page-URL: %s\r\n"
              "Content-Type: text/html\r\n"
              "Content-Length: %d\r\n"
              "Connection: close\r\n"
              "\r\n",
-             llm_port, conn->client_fd, conn->html_offset); // TODO: change to client_fd
+             llm_port, conn->client_fd, conn->url, conn->html_offset); // TODO: change to client_fd
     
     // Send header
     int sent = write(llm_fd, header, strlen(header));
@@ -690,9 +694,33 @@ bool read_request(int fd, fd_set *all_fds) {
             success = true;
             is_connect = false;
         }
+
+        // create url for HTTPS requests inside tunnel
+        if (conn->url) free(conn->url);
+        conn->url = malloc(strlen(host) + strlen(path) + 20);
+        sprintf(conn->url, "https://%s%s", host, path);
     }
 
     if (!success) return false;
+
+    // Construct full URL for HTTP/HTTPS, give to LLM for context
+    if (!is_connect && host && path) {
+        if (conn->url) free(conn->url);
+        
+        // Determine scheme
+        const char *scheme = conn->is_https ? "https" : "http";
+        
+        // Construct URL
+        conn->url = malloc(strlen(scheme) + strlen(host) + strlen(path) + 20);
+        if (strcmp(port, "80") == 0 || strcmp(port, "443") == 0) {
+            // Omit default ports
+            sprintf(conn->url, "%s://%s%s", scheme, host, path);
+        } else {
+            sprintf(conn->url, "%s://%s:%s%s", scheme, host, port, path);
+        }
+        
+        fprintf(stderr, "DEBUG: Request URL: %s\n", conn->url);
+    }
 
     // handle CONNECT requests (HTTPS) differently from GET requests (HTTP)
     if (is_connect) {
@@ -1865,6 +1893,8 @@ struct Connection *Connection_create(int client_fd) {
     new_conn->chunked_decode_buf = NULL;
     new_conn->chunked_decode_capacity = 0;
     new_conn->chunked_decode_offset = 0;
+
+    new_conn->url = NULL;
     
     return new_conn;
 }
@@ -2206,6 +2236,7 @@ void close_connection(struct Connection **conn_ptr, fd_set *all_fds) {
     free(conn->target_port);
     free(conn->chunked_decode_buf);
     free(conn->response_headers);
+    free(conn->url);
 
     free(conn);
     *conn_ptr = NULL;
