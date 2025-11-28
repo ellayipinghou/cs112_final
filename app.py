@@ -20,45 +20,78 @@ current_page_urls = {}
 # Run llm data transfer route to port 9450
 @app.route('/upload_html', methods=['POST'])
 def process():
-    # get HTML directly from body (not JSON)
     html = request.data.decode('utf-8', errors='ignore')
     if not html:
         return jsonify({"error": "No HTML content"}), 400
     
-    # HTML parser
     soup = BeautifulSoup(html, 'html.parser')
+    
+    # Extract page title and description
+    title = soup.find('title')
+    title_text = title.get_text(strip=True) if title else "Unknown"
+    
+    meta_desc = soup.find('meta', attrs={'name': 'description'})
+    description_text = meta_desc.get('content', '') if meta_desc else ""
 
     # Remove scripts, styles, navigation, etc.
-    for tag in soup(['script', 'style']):
+    for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
         tag.decompose()
 
-    # Focus on main content if present (ADD THIS HERE)
+    # Focus on main content
     main_content = soup.find('main') or soup.find('article') or soup.find(id='content') or soup.body
     
-    # Get text from main content (or fallback to entire soup)
     text = (main_content or soup).get_text(separator='\n', strip=True)
     
     # Remove excessive whitespace
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     cleaned_text = '\n'.join(lines)
     
-    # Debug: print text
-    print(f"Cleaned text: {cleaned_text}")
+    # Prepend metadata for better context
+    context_with_metadata = f"Page Title: {title_text}\n"
+    if description_text:
+        context_with_metadata += f"Page Description: {description_text}\n"
+    context_with_metadata += f"\nPage Content:\n{cleaned_text}"
+    
+    print(f"Cleaned text (first 500 chars): {context_with_metadata[:500]}")
     
     client_fd = request.headers.get('Client-FD', 'unknown')
     page_url = request.headers.get('Page-URL', 'unknown')
-
-    # Sanitize URL by removing query params and fragments
-    parsed = urlparse(page_url)
-    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     
-    # create NEW session for each page upload
+    print(f"DEBUG: Received Page-URL header: '{page_url}'")
+
+    # Handle missing/invalid URL
+    if not page_url or page_url == 'unknown' or page_url == '(null)':
+        print("WARNING: Invalid Page-URL, using fallback")
+        clean_url = f"unknown_page_{client_fd}"
+    else:
+        try:
+            parsed = urlparse(page_url)
+            if parsed.netloc:
+                if parsed.path and parsed.path != '/':
+                    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                else:
+                    clean_url = f"{parsed.scheme}://{parsed.netloc}"
+            else:
+                print(f"WARNING: Could not parse URL '{page_url}'")
+                clean_url = f"unknown_page_{client_fd}"
+        except Exception as e:
+            print(f"ERROR parsing URL: {e}")
+            clean_url = f"unknown_page_{client_fd}"
+    
+    print(f"DEBUG: Clean URL: '{clean_url}'")
+    
     page_session_id = f"page_{clean_url}"
-    current_page_urls[client_fd] = clean_url # Store which URL this client is viewing
+    current_page_urls[client_fd] = clean_url
 
     print(f"DEBUG UPLOAD: page_session_id={page_session_id}, client_fd={client_fd}, html_length={len(html)}")
 
-    response = text_upload(text=cleaned_text, strategy='smart', session_id=page_session_id, description=f'Content from webpage visited by client {client_fd}')
+    # Upload with metadata included
+    response = text_upload(
+        text=context_with_metadata,  # Use version with metadata
+        strategy='smart', 
+        session_id=page_session_id, 
+        description=f'Content from webpage: {clean_url} (Title: {title_text})'
+    )
 
     print(f"DEBUG UPLOAD RESPONSE: {response}")
 
