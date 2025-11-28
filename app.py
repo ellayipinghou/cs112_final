@@ -2,21 +2,26 @@ from typing import Optional, Union, List, Dict, Any
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from llmproxy import generate, text_upload, retrieve
+import time
 
 app = Flask(__name__)
 
-#run llm data transfer route to port 9450
+# Add CORS headers to all responses
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Client-FD'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    return response
+
+# Dictionary for current page sessions for each client fd
+current_page_sessions = {}
+
+# Run llm data transfer route to port 9450
 @app.route('/upload_html', methods=['POST'])
 def process():
     # get HTML directly from body (not JSON)
     html = request.data.decode('utf-8', errors='ignore')
-
-    # data = request.get_json() 
-    # if not data or "html" not in data:
-    #     return jsonify({"error": "Invalid request format"}), 400
-    
-    # html = data["html"]
-    
     if not html:
         return jsonify({"error": "No HTML content"}), 400
     
@@ -27,23 +32,28 @@ def process():
     for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
         tag.decompose()
 
-    # Get main content text
-    text = soup.get_text(separator='\n', strip=True)
+    # Focus on main content if present (ADD THIS HERE)
+    main_content = soup.find('main') or soup.find('article') or soup.find(id='content') or soup.body
+    
+    # Get text from main content (or fallback to entire soup)
+    text = (main_content or soup).get_text(separator='\n', strip=True)
     
     # Remove excessive whitespace
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     cleaned_text = '\n'.join(lines)
     
-    # get text
+    # Debug: print text
     print(f"Cleaned text: {cleaned_text}")
     
     client_fd = request.headers.get('Client-FD', 'unknown')
-    session_id = f"client_{client_fd}"
+    
+    # create NEW session for each page upload
+    page_session_id = f"page_{client_fd}_{int(time.time())}"
+    current_page_sessions[client_fd] = page_session_id
 
-    print(f"DEBUG UPLOAD: session_id={session_id}, client_fd={client_fd}, html_length={len(html)}")
+    print(f"DEBUG UPLOAD: page_session_id={page_session_id}, client_fd={client_fd}, html_length={len(html)}")
 
-    # llm does stuff
-    response = text_upload(text=cleaned_text, strategy='smart', session_id=session_id, description='Text of HTML page')
+    response = text_upload(text=cleaned_text, strategy='smart', session_id=page_session_id, description=f'Content from webpage visited by client {client_fd}')
 
     print(f"DEBUG UPLOAD RESPONSE: {response}")
 
@@ -58,16 +68,19 @@ def query():
     user_query = data["query"]
 
     client_fd = request.headers.get('Client-FD', 'unknown')
-    session_id = f"client_{client_fd}"
 
-    print(f"DEBUG: Query for session_id={session_id}, client_fd={client_fd}")
+    # retrieve from most recent PAGE session (not conversation session)
+    page_session_id = current_page_sessions.get(client_fd, f"page_{client_fd}")
+    print(f"DEBUG: Using page_session_id={page_session_id} for client_fd={client_fd}")
+
+    print(f"DEBUG: Query for session_id={page_session_id}, client_fd={client_fd}")
 
     # retrieve relevant chunks from the session
     context_chunks = retrieve(
         query=user_query,
-        session_id=session_id,
+        session_id=page_session_id,
         rag_threshold=0.1,  # lower threshold = more inclusive
-        rag_k=5  # get top 5 relevant chunks
+        rag_k=3  # get top 3 relevant chunks
     )
 
     if not context_chunks:
@@ -87,16 +100,16 @@ def query():
     if not context_text.strip():
         return jsonify({"text": "No context found. Document may still be processing."})
     
-    prompt = f"Context:\n{context_text}\n\nQuestion: {user_query}"
-
-    # call generate with the context
+    # Use CONVERSATION session for generate (maintains chat history)
+    conv_session_id = f"chat_{client_fd}"
+    
     response = generate(
         model='4o-mini',
-        system="You will receive the text of an HTML page. Answer user queries based on it. If no context is found, inform the user.",
-        query=prompt,
+        system="You are a helpful assistant answering questions about a webpage. Use the provided context from the page to answer the user's questions.",
+        query=f"Page content:\n{context_text}\n\nUser question: {user_query}",
         temperature=0.0,
-        lastk=0,
-        session_id=session_id
+        lastk=3,  # Include last 3 messages for conversational context
+        session_id=conv_session_id,  # Separate conversation session
     )
 
     print(response["response"])
@@ -107,5 +120,31 @@ def query():
 
 # curl -X POST http://127.0.0.1:9450/query -H "Content-Type: application/json" -H "Client-FD: 123" -d '{"query": "summarize the page in one paragraph, at a fifth grade level"}'
 
+# @app.route('/generic_query', methods=['POST'])
+# def generic_query():
+#     data = request.get_json()
+#     if not data or "query" not in data:
+#         return jsonify({"error": "Missing 'query' field"}), 400
+
+#     user_query = data["query"]
+
+#     client_fd = request.headers.get('Client-FD', 'unknown')
+#     session_id = f"client_{client_fd}"
+
+#     # call generate with the context
+#     response = generate(
+#         model='4o-mini',
+#         system="Answer the user query. Consult online resources if necessary.",
+#         query=user_query,
+#         temperature=0.0,
+#         lastk=0,
+#         session_id=session_id
+#     )
+
+#     print(response["response"])
+
+#     return jsonify({"text": response["response"]})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9450)
+
