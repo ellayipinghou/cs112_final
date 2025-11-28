@@ -2,7 +2,7 @@ from typing import Optional, Union, List, Dict, Any
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from llmproxy import generate, text_upload, retrieve
-import time
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 
@@ -14,8 +14,8 @@ def add_cors_headers(response):
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     return response
 
-# Dictionary for current page sessions for each client fd
-current_page_sessions = {}
+# Dictionary mapping client_fd to their current page URL
+current_page_urls = {} 
 
 # Run llm data transfer route to port 9450
 @app.route('/upload_html', methods=['POST'])
@@ -29,7 +29,7 @@ def process():
     soup = BeautifulSoup(html, 'html.parser')
 
     # Remove scripts, styles, navigation, etc.
-    for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+    for tag in soup(['script', 'style']):
         tag.decompose()
 
     # Focus on main content if present (ADD THIS HERE)
@@ -46,10 +46,15 @@ def process():
     print(f"Cleaned text: {cleaned_text}")
     
     client_fd = request.headers.get('Client-FD', 'unknown')
+    page_url = request.headers.get('Page-URL', 'unknown')
+
+    # Sanitize URL by removing query params and fragments
+    parsed = urlparse(page_url)
+    clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
     
     # create NEW session for each page upload
-    page_session_id = f"page_{client_fd}_{int(time.time())}"
-    current_page_sessions[client_fd] = page_session_id
+    page_session_id = f"page_{clean_url}"
+    current_page_urls[client_fd] = clean_url # Store which URL this client is viewing
 
     print(f"DEBUG UPLOAD: page_session_id={page_session_id}, client_fd={client_fd}, html_length={len(html)}")
 
@@ -70,7 +75,14 @@ def query():
     client_fd = request.headers.get('Client-FD', 'unknown')
 
     # retrieve from most recent PAGE session (not conversation session)
-    page_session_id = current_page_sessions.get(client_fd, f"page_{client_fd}")
+    page_url = current_page_urls.get(client_fd, "unknown")
+
+    if page_url == "unknown":
+        return jsonify({"text": "No page loaded yet. Please navigate to a webpage first."})
+    
+    # Use URL-based session ID
+    page_session_id = f"page_{page_url}"
+    
     print(f"DEBUG: Using page_session_id={page_session_id} for client_fd={client_fd}")
 
     print(f"DEBUG: Query for session_id={page_session_id}, client_fd={client_fd}")
