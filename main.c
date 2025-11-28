@@ -26,32 +26,6 @@
 #define BUFFER_SIZE 32768
 #define HTML_BUFFER_SIZE 262144
 
-// const char *CHATBOT_SNIPPET =
-// "<div id=\"mitm-chatbot-box\" style=\"position:fixed;bottom:20px;right:20px;width:300px;background:white;border:1px solid #ccc;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1);padding:10px;font-family:sans-serif;z-index:10000\">\n"
-// "  <h3 style=\"margin:0 0 10px 0;font-size:14px;color:#333\">Chat Assistant</h3>\n"
-// "  <div id=\"mitm-chatbot-reply\" style=\"max-height:200px;overflow-y:auto;margin-bottom:10px;padding:5px;background:#f9f9f9;border-radius:4px;font-size:12px\"></div>\n"
-// "  <input type=\"text\" id=\"mitm-chatbot-input\" placeholder=\"Type a message...\" style=\"width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:12px;box-sizing:border-box\" />\n"
-// "</div>\n"
-// "\n"
-// "<script>\n"
-// "document.getElementById(\"mitm-chatbot-input\").addEventListener(\"keydown\", async function(e) {\n"
-// "  if (e.key !== \"Enter\") return;\n"
-// "  let msg = this.value;\n"
-// "  this.value = \"\";\n"
-// "  let box = document.getElementById(\"mitm-chatbot-reply\");\n"
-// "  box.innerHTML += \"<div><b>You:</b> \" + msg + \"</div>\";\n"
-// "\n"
-// "  let resp = await fetch(\"http://localhost:9450/query\", {\n"
-// "    method: \"POST\",\n"
-// "    headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"888\" },\n"
-// "    body: JSON.stringify({ query: msg })\n"
-// "  });\n"
-// "  let data = await resp.json();\n"
-// "  box.innerHTML += \"<div><b>Bot:</b> \" + data.text + \"</div>\";\n"
-// "  box.scrollTop = box.scrollHeight;\n"
-// "});\n"
-// "</script>\n";
-
 // phases describing proxy state machine
 enum ReadPhase {
     // shared states
@@ -455,7 +429,7 @@ char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int
             (html[i+5] == '>' || html[i+5] == ' ' || html[i+5] == '\t' || html[i+5] == '\n' || html[i+5] == '\r')) {
             body_tag = html + i;
             break;
-        } 
+        }
     }
     
     const char *insert_point = NULL;
@@ -464,7 +438,7 @@ char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int
     if (body_tag) {
         insert_point = strchr(body_tag, '>');
         if (!insert_point) {
-            fprintf(stderr, "ERROR: Incorect <body> tag\n");
+            fprintf(stderr, "ERROR: Malformed <body> tag\n");
             free(CHATBOT_SNIPPET);
             return NULL;
         }
@@ -559,7 +533,7 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
              "Content-Length: %d\r\n"
              "Connection: close\r\n"
              "\r\n",
-             llm_port, 888, conn->html_offset); // TODO: change to client_fd
+             llm_port, conn->client_fd, conn->html_offset); // TODO: change to client_fd
     
     // Send header
     int sent = write(llm_fd, header, strlen(header));
@@ -1222,6 +1196,10 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
 
         // If HTML, store headers so we can update Content-Length later
         if (conn->is_html) {
+            // Free old headers if they exist
+            if (conn->response_headers) {
+                free(conn->response_headers);
+            }
             conn->response_headers = malloc(headers_len + 1);
             memcpy(conn->response_headers, conn->buf, headers_len);
             conn->response_headers_len = headers_len;
