@@ -314,10 +314,10 @@ int main(int argc, char *argv[]) {
 
 // Generate AllRecipes-specific chatbot snippet
 char *generate_allrecipes_chatbot_snippet(int client_fd) {
-    char *snippet = malloc(8192);
+    char *snippet = malloc(16384);
     if (!snippet) return NULL;
     
-    snprintf(snippet, 8192,
+    snprintf(snippet, 16384,
 "<div id=\"mitm-chat-toggle\" style=\"\n"
 " position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
 " padding: 12px 24px; background: #e85d04; color: white;\n" // Orange for AllRecipes
@@ -423,6 +423,23 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "        } catch(e) {}\n"
 "    }\n"
 "\n"
+"    function formatMessage(text) {\n"
+"        // Simple formatting: bold, list items, newlines\n"
+"        let formatted = text\n"
+"            // Bold: **text** -> <b>text</b>\n"
+"            .replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>')\n"
+"            // List items: - text or * text -> <li>text</li>\n"
+"            .replace(/^[\\s]*[-*] (.*)/gm, '<li>$1</li>')\n"
+"            // Line breaks\n"
+"            .replace(/\\n/g, '<br>');\n"
+"\n"
+"        // Wrap list items in <ul> if they exist\n"
+"        if (formatted.includes('<li>')) {\n"
+"           formatted = formatted.replace(/((<li>.*<\\/li>)+)/g, '<ul>$1</ul>');\n"
+"        }\n"
+"        return formatted;\n"
+"    }\n"
+"\n"
 "    function appendMessage(sender, text) {\n"
 "        const isUser = sender === \"You\";\n"
 "        const style = isUser \n"
@@ -430,13 +447,16 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "            : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
 "        const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
 "        \n"
+"        // Only format bot messages\n"
+"        const content = isUser ? text : formatMessage(text);\n"
+"        \n"
 "        box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
 "            <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
-"                ${text}\n"
+"                ${content}\n"
 "            </div>\n"
 "        </div>`;\n"
 "        box.scrollTop = box.scrollHeight;\n"
-"        saveMsg(sender, text);\n"
+"        saveMsg(sender, text); // Save original raw text\n"
 "    }\n"
 "\n"
 "    // Load history\n"
@@ -448,9 +468,13 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "                 ? \"background: #e85d04; color: white; margin-left: auto; border-bottom-right-radius: 4px;\" \n"
 "                 : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
 "             const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
+"             \n"
+"             // Format loaded messages too\n"
+"             const content = isUser ? msg.text : formatMessage(msg.text);\n"
+"             \n"
 "             box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
 "                 <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
-"                     ${msg.text}\n"
+"                     ${content}\n"
 "                 </div>\n"
 "             </div>`;\n"
 "        });\n"
@@ -494,10 +518,10 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
         return generate_allrecipes_chatbot_snippet(client_fd);
     }
     // Allocate buffer - should be plenty for the HTML + script
-    char *snippet = malloc(8192);
+    char *snippet = malloc(16384);
     if (!snippet) return NULL;
 
-    snprintf(snippet, 8192,
+    snprintf(snippet, 16384,
 "<div id=\"mitm-chat-toggle\" style=\"\n"
 " position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
 " padding: 12px 24px; background: #007bff; color: white;\n"
@@ -584,6 +608,23 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "        } catch(e) {}\n"
 "    }\n"
 "\n"
+"    function formatMessage(text) {\n"
+"        // Simple formatting: bold, list items, newlines\n"
+"        let formatted = text\n"
+"            // Bold: **text** -> <b>text</b>\n"
+"            .replace(/\\*\\*(.*?)\\*\\*/g, '<b>$1</b>')\n"
+"            // List items: - text or * text -> <li>text</li>\n"
+"            .replace(/^[\\s]*[-*] (.*)/gm, '<li>$1</li>')\n"
+"            // Line breaks\n"
+"            .replace(/\\n/g, '<br>');\n"
+"\n"
+"        // Wrap list items in <ul> if they exist\n"
+"        if (formatted.includes('<li>')) {\n"
+"           formatted = formatted.replace(/((<li>.*<\\/li>)+)/g, '<ul>$1</ul>');\n"
+"        }\n"
+"        return formatted;\n"
+"    }\n"
+"\n"
 "    function appendMessage(sender, text) {\n"
 "        const isUser = sender === \"You\";\n"
 "        const style = isUser \n"
@@ -591,13 +632,16 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "            : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
 "        const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
 "        \n"
+"        // Only format bot messages\n"
+"        const content = isUser ? text : formatMessage(text);\n"
+"        \n"
 "        box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
 "            <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
-"                ${text}\n"
+"                ${content}\n"
 "            </div>\n"
 "        </div>`;\n"
 "        box.scrollTop = box.scrollHeight;\n"
-"        saveMsg(sender, text);\n"
+"        saveMsg(sender, text); // Save original raw text\n"
 "    }\n"
 "\n"
 "    loadChat();\n"
