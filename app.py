@@ -150,7 +150,7 @@ def query():
     
     response = generate(
         model='4o-mini',
-        system="You are a helpful assistant answering questions about a webpage. Use the provided context from the page to answer the user's questions.",
+        system="You are a helpful assistant answering questions about a webpage. Answer the user's questions, using the provided context from the page if relevant.",
         query=f"Page content:\n{context_text}\n\nUser question: {user_query}",
         temperature=0.0,
         lastk=3,  # Include last 3 messages for conversational context
@@ -160,35 +160,6 @@ def query():
     print(response["response"])
 
     return jsonify({"text": response["response"]})
-
-# curl -X POST http://127.0.0.1:9450/upload_html      -H "Content-Type: application/json"      -d '{"html": "<html><body><h1>Hello from curl</h1></body></html>"}'
-
-# curl -X POST http://127.0.0.1:9450/query -H "Content-Type: application/json" -H "Client-FD: 123" -d '{"query": "summarize the page in one paragraph, at a fifth grade level"}'
-
-# @app.route('/generic_query', methods=['POST'])
-# def generic_query():
-#     data = request.get_json()
-#     if not data or "query" not in data:
-#         return jsonify({"error": "Missing 'query' field"}), 400
-
-#     user_query = data["query"]
-
-#     client_fd = request.headers.get('Client-FD', 'unknown')
-#     session_id = f"client_{client_fd}"
-
-#     # call generate with the context
-#     response = generate(
-#         model='4o-mini',
-#         system="Answer the user query. Consult online resources if necessary.",
-#         query=user_query,
-#         temperature=0.0,
-#         lastk=0,
-#         session_id=session_id
-#     )
-
-#     print(response["response"])
-
-#     return jsonify({"text": response["response"]})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9450)
