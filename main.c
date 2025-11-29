@@ -139,6 +139,8 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
 bool send_to_llm(struct Connection *conn, int llm_port);
 int decompress_chunk(struct Connection *conn, char *input, int input_len, char *output, int output_size);
 char *find_body_tag(char *buf, int len);
+bool is_ad_domain(const char *hostname);
+char *generate_chatbot_snippet(int client_fd, bool is_allrecipes);
 // int get_LLM_fd(); 
 
 int main(int argc, char *argv[]) {
@@ -310,52 +312,322 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-// Generate chatbot snippet with actual client FD
-char *generate_chatbot_snippet(int client_fd) {
-    // Allocate buffer - should be plenty for the HTML + script
-    char *snippet = malloc(2048);
+// Generate AllRecipes-specific chatbot snippet
+char *generate_allrecipes_chatbot_snippet(int client_fd) {
+    char *snippet = malloc(8192);
     if (!snippet) return NULL;
     
-    snprintf(snippet, 2048,
-"<div id=\"mitm-chatbot-box\" style=\"\n"
-" position: fixed;\n"
-" bottom: 20px;\n"
-" right: 20px;\n"
-" width: 260px;\n"
-" background: white;\n"
-" border: 2px solid #333;\n"
-" padding: 10px;\n"
-" z-index: 999999;\n"
-" box-shadow: 0px 0px 10px rgba(0,0,0,0.4);\n"
-" font-family: sans-serif;\">\n"
-" <div style=\"font-weight: bold; margin-bottom: 8px;\">Chatbot</div>\n"
-" <div id=\"mitm-chatbot-reply\" style=\"height: 80px; overflow-y: auto; border: 1px solid #ccc; padding: 6px; margin-bottom: 8px;\"></div>\n"
-" <input id=\"mitm-chatbot-input\" type=\"text\" style=\"width: 100%%; padding: 6px; box-sizing: border-box;\" placeholder=\"Ask a question about the page...\"/>\n"
+    snprintf(snippet, 8192,
+"<div id=\"mitm-chat-toggle\" style=\"\n"
+" position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
+" padding: 12px 24px; background: #e85d04; color: white;\n" // Orange for AllRecipes
+" border-radius: 30px; cursor: pointer; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
+" font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.15);\n"
+" transition: all 0.3s ease; display: flex; align-items: center; gap: 8px;\">\n"
+" <span>👨‍🍳</span> <span>Chef Bot</span>\n"
 "</div>\n"
 "\n"
-"<script>\n"
-"document.getElementById(\"mitm-chatbot-input\").addEventListener(\"keydown\", async function(e) {\n"
-" if (e.key !== \"Enter\") return;\n"
-" let msg = this.value;\n"
-" this.value = \"\";\n"
-" let box = document.getElementById(\"mitm-chatbot-reply\");\n"
-" box.innerHTML += \"<div><b>You:</b> \" + msg + \"</div>\";\n"
+"<div id=\"mitm-chat-window\" style=\"\n"
+" position: fixed; top: 0; left: 0; width: 100%%; height: 50vh;\n"
+" background: white; border-bottom: 1px solid #eee; z-index: 2147483646;\n"
+" box-shadow: 0 10px 30px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
+" box-sizing: border-box; padding: 0; display: flex; flex-direction: column;\n"
+" transform: translateY(-100%%); transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); visibility: hidden;\">\n"
+" <div style=\"flex-grow: 1; width: 100%%; max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; height: 100%%;\">\n"
+"  <div style=\"font-size: 20px; font-weight: 700; margin-bottom: 20px; color: #e85d04; display: flex; align-items: center; gap: 10px; flex-shrink: 0;\">\n"
+"   <span>👨‍🍳</span> <span>AllRecipes Chef</span>\n"
+"  </div>\n"
+"  <div id=\"mitm-chatbot-reply\" style=\"flex-grow: 1; overflow-y: auto; border: 1px solid #e1e4e8; padding: 20px; margin-bottom: 20px; background: #fff5f0; border-radius: 12px; scroll-behavior: smooth; display: flex; flex-direction: column;\"></div>\n"
+"  <div style=\"position: relative; flex-shrink: 0; background: white; padding-top: 10px;\">\n"
+"   <input id=\"mitm-chatbot-input\" type=\"text\" style=\"width: 100%%; padding: 15px 20px; padding-right: 50px; box-sizing: border-box; border: 2px solid #e1e4e8; border-radius: 30px; font-size: 16px; outline: none; transition: border-color 0.2s;\" placeholder=\"Ask about this recipe...\"/>\n"
+"   <div style=\"position: absolute; right: 15px; top: 50%%; transform: translateY(-50%%); color: #e85d04; cursor: pointer;\">➤</div>\n"
+"  </div>\n"
+" </div>\n"
+"</div>\n"
 "\n"
-" let resp = await fetch(\"http://localhost:9450/query\", {\n"
-"  method: \"POST\",\n"
-"  headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"%d\" },\n"
-"  body: JSON.stringify({ query: msg })\n"
-" });\n"
-" let data = await resp.json();\n"
-" box.innerHTML += \"<div><b>Bot:</b> \" + data.text + \"</div>\";\n"
-" box.scrollTop = box.scrollHeight;\n"
-"});\n"
+"<style>\n"
+".mitm-suggestion {\n"
+"    background: white;\n"
+"    border: 1px solid #e85d04;\n"
+"    color: #e85d04;\n"
+"    border-radius: 20px;\n"
+"    padding: 8px 15px;\n"
+"    font-size: 12px;\n"
+"    cursor: pointer;\n"
+"    margin-right: 8px;\n"
+"    margin-bottom: 5px;\n"
+"    transition: all 0.2s;\n"
+"    display: inline-block;\n"
+"}\n"
+".mitm-suggestion:hover {\n"
+"    background: #fff5f0;\n"
+"}\n"
+"</style>\n"
+"\n"
+"<script>\n"
+"(function() {\n"
+"    const toggle = document.getElementById(\"mitm-chat-toggle\");\n"
+"    const window = document.getElementById(\"mitm-chat-window\");\n"
+"    const box = document.getElementById(\"mitm-chatbot-reply\");\n"
+"    const input = document.getElementById(\"mitm-chatbot-input\");\n"
+"    const storageKey = \"mitm_allrecipes_history\";\n"
+"    let isOpen = false;\n"
+"\n"
+"    function toggleChat() {\n"
+"        isOpen = !isOpen;\n"
+"        if (isOpen) {\n"
+"            window.style.visibility = \"visible\";\n"
+"            window.style.transform = \"translateY(0)\";\n"
+"            toggle.innerHTML = \"<span>✕</span> <span>Close Chat</span>\";\n"
+"            toggle.style.background = \"#343a40\";\n"
+"            setTimeout(() => input.focus(), 400);\n"
+"        } else {\n"
+"            window.style.transform = \"translateY(-100%%)\";\n"
+"            toggle.innerHTML = \"<span>👨‍🍳</span> <span>Chef Bot</span>\";\n"
+"            toggle.style.background = \"#e85d04\";\n"
+"            setTimeout(() => { if(!isOpen) window.style.visibility = \"hidden\"; }, 400);\n"
+"        }\n"
+"    }\n"
+"\n"
+"    toggle.onclick = toggleChat;\n"
+"    input.onfocus = () => input.style.borderColor = \"#e85d04\";\n"
+"    input.onblur = () => input.style.borderColor = \"#e1e4e8\";\n"
+"\n"
+"    function appendSuggestions() {\n"
+"        const suggestions = [\n"
+"            { text: \"🔄 Substitutions\", query: \"What are some ingredient substitutions for this recipe?\" },\n"
+"            { text: \"🍳 Similar Recipes\", query: \"Show me similar recipes to this one.\" },\n"
+"            { text: \"💡 Cooking Tips\", query: \"What are some general cooking tips for this recipe?\" }\n"
+"        ];\n"
+"        const container = document.createElement('div');\n"
+"        container.style.cssText = 'margin-top: auto; margin-bottom: 15px; margin-left: 10px;';\n"
+"        suggestions.forEach(s => {\n"
+"            const btn = document.createElement('div');\n"
+"            btn.className = 'mitm-suggestion';\n"
+"            btn.textContent = s.text;\n"
+"            btn.onclick = function() {\n"
+"                input.value = s.query;\n"
+"                const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });\n"
+"                input.dispatchEvent(event);\n"
+"            };\n"
+"            container.appendChild(btn);\n"
+"        });\n"
+"        box.appendChild(container);\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"    }\n"
+"    function saveMsg(sender, text) {\n"
+"        try {\n"
+"            const history = JSON.parse(sessionStorage.getItem(storageKey) || \"[]\");\n"
+"            history.push({sender: sender, text: text});\n"
+"            sessionStorage.setItem(storageKey, JSON.stringify(history));\n"
+"        } catch(e) {}\n"
+"    }\n"
+"\n"
+"    function appendMessage(sender, text) {\n"
+"        const isUser = sender === \"You\";\n"
+"        const style = isUser \n"
+"            ? \"background: #e85d04; color: white; margin-left: auto; border-bottom-right-radius: 4px;\" \n"
+"            : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
+"        const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
+"        \n"
+"        box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
+"            <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
+"                ${text}\n"
+"            </div>\n"
+"        </div>`;\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"        saveMsg(sender, text);\n"
+"    }\n"
+"\n"
+"    // Load history\n"
+"    try {\n"
+"        const history = JSON.parse(sessionStorage.getItem(storageKey) || \"[]\");\n"
+"        history.forEach(msg => {\n"
+"             const isUser = msg.sender === \"You\";\n"
+"             const style = isUser \n"
+"                 ? \"background: #e85d04; color: white; margin-left: auto; border-bottom-right-radius: 4px;\" \n"
+"                 : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
+"             const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
+"             box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
+"                 <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
+"                     ${msg.text}\n"
+"                 </div>\n"
+"             </div>`;\n"
+"        });\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"    } catch(e) {}\n"
+"\n"
+"    // Show suggestions on load\n"
+"    appendSuggestions();\n"
+"\n"
+"    input.addEventListener(\"keydown\", async function(e) {\n"
+"        if (e.key !== \"Enter\") return;\n"
+"        let msg = this.value;\n"
+"        if (!msg) return;\n"
+"        this.value = \"\";\n"
+"\n"
+"        appendMessage(\"You\", msg);\n"
+"\n"
+"        try {\n"
+"            let resp = await fetch(\"http://localhost:9450/query\", {\n"
+"                method: \"POST\",\n"
+"                headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"%d\" },\n"
+"                body: JSON.stringify({ query: msg })\n"
+"            });\n"
+"            let data = await resp.json();\n"
+"            appendMessage(\"Bot\", data.text);\n"
+"            appendSuggestions();\n"
+"        } catch(err) {\n"
+"            appendMessage(\"Bot\", \"Error connecting to server\");\n"
+"        }\n"
+"    });\n"
+"})();\n"
 "</script>\n",
     client_fd);
     
     return snippet;
 }
 
+// Generate chatbot snippet with actual client FD
+char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
+    if (is_allrecipes) {
+        return generate_allrecipes_chatbot_snippet(client_fd);
+    }
+    // Allocate buffer - should be plenty for the HTML + script
+    char *snippet = malloc(8192);
+    if (!snippet) return NULL;
+
+    snprintf(snippet, 8192,
+"<div id=\"mitm-chat-toggle\" style=\"\n"
+" position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
+" padding: 12px 24px; background: #007bff; color: white;\n"
+" border-radius: 30px; cursor: pointer; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
+" font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.15);\n"
+" transition: all 0.3s ease; display: flex; align-items: center; gap: 8px;\">\n"
+" <span>💬</span> <span>Open Chat</span>\n"
+"</div>\n"
+"\n"
+"<div id=\"mitm-chat-window\" style=\"\n"
+" position: fixed; top: 0; left: 0; width: 100%%; height: 50vh;\n"
+" background: white; border-bottom: 1px solid #eee; z-index: 2147483646;\n"
+" box-shadow: 0 10px 30px rgba(0,0,0,0.1); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
+" box-sizing: border-box; padding: 0; display: flex; flex-direction: column;\n"
+" transform: translateY(-100%%); transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); visibility: hidden;\">\n"
+" <div style=\"flex-grow: 1; width: 100%%; max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; height: 100%%;\">\n"
+"  <div style=\"font-size: 20px; font-weight: 700; margin-bottom: 20px; color: #1a1a1a; display: flex; align-items: center; gap: 10px; flex-shrink: 0;\">\n"
+"   <span>🤖</span> <span>AI Assistant</span>\n"
+"  </div>\n"
+"  <div id=\"mitm-chatbot-reply\" style=\"flex-grow: 1; overflow-y: auto; border: 1px solid #e1e4e8; padding: 20px; margin-bottom: 20px; background: #f8f9fa; border-radius: 12px; scroll-behavior: smooth;\"></div>\n"
+"  <div style=\"position: relative; flex-shrink: 0; background: white; padding-top: 10px;\">\n"
+"   <input id=\"mitm-chatbot-input\" type=\"text\" style=\"width: 100%%; padding: 15px 20px; padding-right: 50px; box-sizing: border-box; border: 2px solid #e1e4e8; border-radius: 30px; font-size: 16px; outline: none; transition: border-color 0.2s;\" placeholder=\"Ask a question about this page...\"/>\n"
+"   <div style=\"position: absolute; right: 15px; top: 50%%; transform: translateY(-50%%); color: #007bff; cursor: pointer;\">➤</div>\n"
+"  </div>\n"
+" </div>\n"
+"</div>\n"
+"\n"
+"<script>\n"
+"(function() {\n"
+"    const toggle = document.getElementById(\"mitm-chat-toggle\");\n"
+"    const window = document.getElementById(\"mitm-chat-window\");\n"
+"    const box = document.getElementById(\"mitm-chatbot-reply\");\n"
+"    const input = document.getElementById(\"mitm-chatbot-input\");\n"
+"    const storageKey = \"mitm_chat_history\";\n"
+"    let isOpen = false;\n"
+"\n"
+"    function toggleChat() {\n"
+"        isOpen = !isOpen;\n"
+"        if (isOpen) {\n"
+"            window.style.visibility = \"visible\";\n"
+"            window.style.transform = \"translateY(0)\";\n"
+"            toggle.innerHTML = \"<span>✕</span> <span>Close Chat</span>\";\n"
+"            toggle.style.background = \"#343a40\";\n"
+"            setTimeout(() => input.focus(), 400);\n"
+"        } else {\n"
+"            window.style.transform = \"translateY(-100%%)\";\n"
+"            toggle.innerHTML = \"<span>💬</span> <span>Open Chat</span>\";\n"
+"            toggle.style.background = \"#007bff\";\n"
+"            setTimeout(() => { if(!isOpen) window.style.visibility = \"hidden\"; }, 400);\n"
+"        }\n"
+"    }\n"
+"\n"
+"    toggle.onclick = toggleChat;\n"
+"\n"
+"    // Add focus effect to input\n"
+"    input.onfocus = () => input.style.borderColor = \"#007bff\";\n"
+"    input.onblur = () => input.style.borderColor = \"#e1e4e8\";\n"
+"\n"
+"    function loadChat() {\n"
+"        try {\n"
+"            const history = JSON.parse(sessionStorage.getItem(storageKey) || \"[]\");\n"
+"            history.forEach(msg => {\n"
+"                const isUser = msg.sender === \"You\";\n"
+"                const style = isUser \n"
+"                    ? \"background: #007bff; color: white; margin-left: auto; border-bottom-right-radius: 4px;\" \n"
+"                    : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
+"                const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
+"                \n"
+"                box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
+"                    <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
+"                        ${msg.text}\n"
+"                    </div>\n"
+"                </div>`;\n"
+"            });\n"
+"            box.scrollTop = box.scrollHeight;\n"
+"        } catch(e) {}\n"
+"    }\n"
+"\n"
+"    function saveMsg(sender, text) {\n"
+"        try {\n"
+"            const history = JSON.parse(sessionStorage.getItem(storageKey) || \"[]\");\n"
+"            history.push({sender: sender, text: text});\n"
+"            sessionStorage.setItem(storageKey, JSON.stringify(history));\n"
+"        } catch(e) {}\n"
+"    }\n"
+"\n"
+"    function appendMessage(sender, text) {\n"
+"        const isUser = sender === \"You\";\n"
+"        const style = isUser \n"
+"            ? \"background: #007bff; color: white; margin-left: auto; border-bottom-right-radius: 4px;\" \n"
+"            : \"background: white; border: 1px solid #e1e4e8; margin-right: auto; border-bottom-left-radius: 4px;\";\n"
+"        const align = isUser ? \"justify-content: flex-end\" : \"justify-content: flex-start\";\n"
+"        \n"
+"        box.innerHTML += `<div style=\"display: flex; ${align}; margin-bottom: 10px;\">\n"
+"            <div style=\"padding: 10px 15px; border-radius: 18px; max-width: 80%%; line-height: 1.5; ${style}\">\n"
+"                ${text}\n"
+"            </div>\n"
+"        </div>`;\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"        saveMsg(sender, text);\n"
+"    }\n"
+"\n"
+"    loadChat();\n"
+"\n"
+"    input.addEventListener(\"keydown\", async function(e) {\n"
+"        if (e.key !== \"Enter\") return;\n"
+"        let msg = this.value;\n"
+"        if (!msg) return;\n"
+"        this.value = \"\";\n"
+"\n"
+"        appendMessage(\"You\", msg);\n"
+"\n"
+"        try {\n"
+"            let resp = await fetch(\"http://localhost:9450/query\", {\n"
+"                method: \"POST\",\n"
+"                headers: { \"Content-Type\": \"application/json\", \"Client-FD\": \"%d\" },\n"
+"                body: JSON.stringify({ query: msg })\n"
+"            });\n"
+"            let data = await resp.json();\n"
+"            appendMessage(\"Bot\", data.text);\n"
+"        } catch(err) {\n"
+"            appendMessage(\"Bot\", \"Error connecting to server\");\n"
+"        }\n"
+"    });\n"
+"})();\n"
+"</script>\n",
+    client_fd);
+    
+    return snippet;
+}
 
 // Update Content-Length header in stored response headers
 // Removes compressed header field
@@ -398,31 +670,76 @@ char *update_content_length_header(const char *headers, int headers_len, int new
     if (conn_close) {
         memcpy(conn_close + 12, "keep-alive", 10);  // Overwrite "close" with "keep-alive"
     }
-    
-    // Find and update Content-Length line
+
+    // Find Content-Length
     char *cl_start = strstr(temp, "Content-Length:");
+    
     if (!cl_start) {
+        // === NEW: Content-Length doesn't exist, ADD IT ===
+        // Find the end of headers (\r\n\r\n)
+        char *headers_end = strstr(temp, "\r\n\r\n");
+        if (!headers_end) {
+            free(temp);
+            return strdup(headers);
+        }
+        
+        // Insert before final \r\n\r\n
+        int insert_pos = headers_end - temp;
+        char new_cl[128];
+        snprintf(new_cl, sizeof(new_cl), "Content-Length: %d\r\n", new_content_len);
+        
+        int new_len = insert_pos + strlen(new_cl) + 4;  // +4 for \r\n\r\n
+        char *result = malloc(new_len + 1);
+        
+        memcpy(result, temp, insert_pos);
+        memcpy(result + insert_pos, new_cl, strlen(new_cl));
+        memcpy(result + insert_pos + strlen(new_cl), "\r\n\r\n", 4);
+        result[new_len] = '\0';
+        
         free(temp);
-        return strdup(headers);
+        return result;
     }
     
-    // Find the end of the Content-Length line
+    // Content-Length exists, update it (existing code)
     char *cl_end = strstr(cl_start, "\r\n");
     if (!cl_end) {
         free(temp);
         return strdup(headers);
     }
     
-    // Build new header with updated Content-Length
     int before_len = cl_start - temp;
-    char *after_cl = cl_end;  // Start of what comes after CL line
+    char *after_cl = cl_end;
     
     char new_cl_line[128];
     snprintf(new_cl_line, sizeof(new_cl_line), "Content-Length: %d", new_content_len);
     
-    // Calculate new total length
     int after_len = current_len - (cl_end - temp);
     int new_headers_len = before_len + strlen(new_cl_line) + after_len;
+    
+    // Find and update Content-Length line
+    // char *cl_start = strstr(temp, "Content-Length:");
+    // if (!cl_start) {
+    //     free(temp);
+    //     return strdup(headers);
+    // }
+    
+    // // Find the end of the Content-Length line
+    // char *cl_end = strstr(cl_start, "\r\n");
+    // if (!cl_end) {
+    //     free(temp);
+    //     return strdup(headers);
+    // }
+    
+    // // Build new header with updated Content-Length
+    // int before_len = cl_start - temp;
+    // char *after_cl = cl_end;  // Start of what comes after CL line
+    
+    // char new_cl_line[128];
+    // snprintf(new_cl_line, sizeof(new_cl_line), "Content-Length: %d", new_content_len);
+    
+    // // Calculate new total length
+    // int after_len = current_len - (cl_end - temp);
+    // int new_headers_len = before_len + strlen(new_cl_line) + after_len;
     
     char *new_headers = malloc(new_headers_len + 1);
     
@@ -440,8 +757,15 @@ char *update_content_length_header(const char *headers, int headers_len, int new
 // returns allocated buffer with injected content, or NULL on failure
 // caller must free the returned buffer
 char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int client_fd) {
+    struct Connection *conn = fd_to_connection[client_fd];
+    char *CHATBOT_SNIPPET = NULL;
+    if (conn->hostname && strcmp(conn->hostname, "www.allrecipes.com") == 0) {
+        CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd, true);
+    } else {
+        CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd, false);
+    }
     // Generate snippet with actual FD
-    char *CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd);
+    //char *CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd);
     if (!CHATBOT_SNIPPET) return NULL;
     
     // find <body tag (case-insensitive, could be <body>, <body attr="...">)
@@ -745,6 +1069,14 @@ bool setup_connect_request(int fd, char *host, char *port, fd_set *all_fds) {
     // save hostname and port for later use
     conn->hostname = strdup(host);
     conn->target_port = strdup(port);
+
+    if (is_ad_domain(host)) {
+        fprintf(stderr, "DEBUG: Blocking ad domain: %s\n", host);
+        // Send connection established to keep browser happy
+        char *response = "HTTP/1.1 200 Connection Established\r\n\r\n";
+        write(conn->client_fd, response, strlen(response));
+        return false;  // Close connection immediately
+    }
     
     // Create initial URL for the host
     if (conn->url) free(conn->url);
@@ -1068,6 +1400,11 @@ bool setup_get_request(int fd, char *host, char *port, char *path, fd_set *all_f
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) return false;
 
+    if (is_ad_domain(host)) {
+        fprintf(stderr, "DEBUG: Blocking ad domain (HTTP): %s\n", host);
+        return false;  // Close connection
+    }
+
     // for HTTPS requests in tunnel, server is already connected
     if (conn->is_https && conn->server_ssl) {
         conn->phase = FORWARDING_REQUEST;
@@ -1152,6 +1489,47 @@ char *find_header_end(char *buf, int len) {
         }
     }
     return NULL;
+}
+
+bool is_ad_domain(const char *hostname) {
+    if (!hostname) return false;
+    
+    // Common ad domains
+    const char *ad_patterns[] = {
+        "doubleclick.net",
+        "googlesyndication.com",
+        "google-analytics.com",
+        "googletagmanager.com",
+        "googleadservices.com",
+        "amazon-adsystem.com",
+        "pubmatic.com",
+        "rubiconproject.com",
+        "adnxs.com",
+        "adsrvr.org",
+        "casalemedia.com",
+        "criteo.com",
+        "openx.net",
+        "3lift.com",
+        "taboola.com",
+        "outbrain.com",
+        "advertising.com",
+        "adtech.de",
+        "ads.mozilla.org",
+        "fundingchoicesmessages.google.com",
+        "btloader.com",
+        "id5-sync.com",
+        "optable.co",
+        "liadm.com",
+        NULL
+    };
+    
+    for (int i = 0; ad_patterns[i] != NULL; i++) {
+        if (strstr(hostname, ad_patterns[i])) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // read HTTP response headers from server
@@ -1585,18 +1963,27 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     injected_len = conn->html_offset;
                 }
                 
-                // Send headers
+                // === FIX: USE UPDATE FUNCTION TO ADD CONTENT-LENGTH ===
                 char *updated_headers = update_content_length_header(conn->response_headers,
                                                                      conn->response_headers_len,
                                                                      injected_len);
                 const char *injection = "X-Proxy:CS112\r\n\r\n";
                 int headers_without_end = strlen(updated_headers) - 2;
                 
-                write(conn->client_fd, updated_headers, headers_without_end);
-                write(conn->client_fd, injection, strlen(injection));
-                write(conn->client_fd, final_html, injected_len);
+                if (conn->is_https) {
+                    ssl_write_with_retry(conn->client_ssl, updated_headers,
+                                headers_without_end, &should_retry);
+                    ssl_write_with_retry(conn->client_ssl, injection,
+                                strlen(injection), &should_retry);
+                    ssl_write_with_retry(conn->client_ssl, final_html, injected_len, &should_retry);
+                } else {
+                    write(conn->client_fd, updated_headers, headers_without_end);
+                    write(conn->client_fd, injection, strlen(injection));
+                    write(conn->client_fd, final_html, injected_len);
+                }
                 
-                free(updated_headers);
+                free(updated_headers);  // Don't forget to free!
+                
                 if (final_html != conn->LLM_buf) {
                     free(conn->LLM_buf);
                     conn->LLM_buf = final_html;
@@ -1604,7 +1991,12 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 }
             } else if (conn->header_sent_to_client) {
                 // Headers already sent, just send body
-                write(conn->client_fd, conn->LLM_buf, conn->html_offset);
+                if (conn->is_https) {
+                    ssl_write_with_retry(conn->client_ssl, conn->LLM_buf, 
+                                        conn->html_offset, &should_retry);
+                } else {
+                    write(conn->client_fd, conn->LLM_buf, conn->html_offset);
+                }
             }
             
             // Send to LLM
@@ -1685,11 +2077,14 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
             
             // === STEP 3: SEND HEADERS WITH UPDATED CONTENT-LENGTH ===
             if (conn->response_headers) {
+                // === FIX: PROPERLY UPDATE CONTENT-LENGTH ===
                 char *updated_headers = update_content_length_header(conn->response_headers,
                                                                      conn->response_headers_len,
                                                                      injected_len);
                 const char *injection = "X-Proxy:CS112\r\n\r\n";
                 int headers_without_end = strlen(updated_headers) - 2;
+                
+                fprintf(stderr, "DEBUG: Updated Content-Length to %d\n", injected_len);
                 
                 if (conn->is_https) {
                     ssl_write_with_retry(conn->client_ssl, updated_headers,
@@ -1701,7 +2096,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     write(conn->client_fd, injection, strlen(injection));
                 }
                 
-                free(updated_headers);
+                free(updated_headers);  // Don't forget to free!
             }
             
             // === STEP 4: SEND ENTIRE HTML TO CLIENT ===
@@ -2164,7 +2559,6 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
     bool from_client = (fd == conn->client_fd);
     
     if (from_client) {
-        // client -> server: forward requests without modification
         char temp_buf[BUFFER_SIZE];
         bool should_retry;
         
@@ -2173,6 +2567,25 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
         if (n <= 0) return false;
         
         if (!conn->server_ssl) return true;
+        
+        // === NEW: Detect new HTTP requests within the tunnel ===
+        if (n > 4 && (strncmp(temp_buf, "GET ", 4) == 0 || strncmp(temp_buf, "POST", 4) == 0)) {
+            // Parse the new request to extract the path
+            char method[16], path[512], version[16];
+            if (sscanf(temp_buf, "%15s %511s %15s", method, path, version) == 3) {
+                // Update URL
+                if (conn->url) free(conn->url);
+                conn->url = malloc(strlen(conn->hostname) + strlen(path) + 20);
+                sprintf(conn->url, "https://%s%s", conn->hostname, path);
+                
+                fprintf(stderr, "DEBUG: New request in tunnel: %s\n", conn->url);
+                
+                // Reset state for new response
+                conn->tunnel_state = TUNNEL_EXPECT_RESPONSE_HEADERS;
+                conn->html_offset = 0;
+                conn->is_html = false;
+            }
+        }
         
         int written = ssl_write_with_retry(conn->server_ssl, temp_buf, n, &should_retry);
         if (written < 0) return false;
@@ -2213,6 +2626,8 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
         // process based on current tunnel state
         switch (conn->tunnel_state) {  
             case TUNNEL_EXPECT_RESPONSE_HEADERS: {
+                fprintf(stderr, "DEBUG: Waiting for response headers on client_fd=%d, server_fd=%d\n", 
+            conn->client_fd, conn->server_fd);
                 // look for end of headers
                 char *end_of_headers = find_header_end(conn->tunnel_buf, conn->tunnel_buf_offset);
                 if (end_of_headers) {
@@ -2255,14 +2670,14 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         }
 
                         // 2. Remove Content-Length (since the length will change after decompression/modification)
-                        char *cl_start = strstr(modified_headers, "Content-Length:");
-                        if (cl_start) {
-                            char *cl_end = strstr(cl_start, "\r\n");
-                            if (cl_end) {
-                                // Remove the Content-Length line
-                                memmove(cl_start, cl_end + 2, strlen(cl_end + 2) + 1);
-                            }
-                        }
+                        // char *cl_start = strstr(modified_headers, "Content-Length:");
+                        // if (cl_start) {
+                        //     char *cl_end = strstr(cl_start, "\r\n");
+                        //     if (cl_end) {
+                        //         // Remove the Content-Length line
+                        //         memmove(cl_start, cl_end + 2, strlen(cl_end + 2) + 1);
+                        //     }
+                        // }
                         
                         // Note: If 'Transfer-Encoding: chunked' was present, it remains. 
                         // This is what forces your proxy to re-chunk the body later.
@@ -2340,6 +2755,20 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             conn->tunnel_buf_offset = 0;
                             fprintf(stderr, "DEBUG: Entering PASSTHROUGH for non-HTML chunked\n");
                         }
+                    }
+                    else if (content_length > 0) {
+                        // === NEW: Handle known content-length responses ===
+                        if (is_html) {
+                            conn->tunnel_state = TUNNEL_READING_RESPONSE_BODY_KNOWN_LENGTH;
+                            conn->tunnel_body_remaining = content_length;
+                            fprintf(stderr, "DEBUG: Entering KNOWN_LENGTH mode for HTML (content_length=%d, compressed=%d)\n",
+                                    content_length, is_compressed);
+                        } else {
+                            // Non-HTML with known length - just passthrough
+                            conn->tunnel_state = TUNNEL_PASSTHROUGH;
+                            conn->tunnel_buf_offset = 0;
+                            fprintf(stderr, "DEBUG: Entering PASSTHROUGH for non-HTML with known length\n");
+                        }
                     } else {
                         // No content-length, no chunked - passthrough until connection closes
                         conn->tunnel_state = TUNNEL_PASSTHROUGH;
@@ -2357,284 +2786,117 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     to_forward = conn->tunnel_body_remaining;
                 }
                 
-                fprintf(stderr, "DEBUG: Processing body - to_forward=%d, remaining=%d, buf_offset=%d, compressed=%d, html=%d\n",
-                        to_forward, conn->tunnel_body_remaining, conn->tunnel_buf_offset, 
-                        conn->is_compressed, conn->is_html);
-                
                 if (conn->is_html) {
-                    char *data_to_process = conn->tunnel_buf;
-                    int data_len = to_forward;
-                    
-                    // === ONLY DECOMPRESS IF ACTUALLY COMPRESSED ===
-                    if (conn->is_compressed) {
-                        if (!conn->decompression_initialized) {
-                            if (!init_streaming_decompressor(conn, (unsigned char *)conn->tunnel_buf, to_forward)) {
-                                fprintf(stderr, "ERROR: Failed to init decompressor\n");
-                                conn->is_compressed = false;
-                                conn->is_html = false;
-                                bool should_retry;
-                                int written = ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf,
-                                                                    to_forward, &should_retry);
-                                if (written < 0) return false;
-                                
-                                // Consume the data
-                                conn->tunnel_body_remaining -= to_forward;
-                                
-                                if (to_forward < conn->tunnel_buf_offset) {
-                                    memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
-                                            conn->tunnel_buf_offset - to_forward);
-                                    conn->tunnel_buf_offset -= to_forward;
-                                } else {
-                                    conn->tunnel_buf_offset = 0;
-                                }
-                                break;
-                            }
-                        }
-                        
-                        // Attempt decompression
-                        int decompressed_len = decompress_chunk(conn, conn->tunnel_buf, to_forward, 
-                                                            conn->decompress_buffer, BUFFER_SIZE);
-                        
-                        fprintf(stderr, "DEBUG: Decompression result: %d bytes from %d compressed bytes\n", 
-                                decompressed_len, to_forward);
-                        
-                        if (decompressed_len < 0) {
-                            fprintf(stderr, "ERROR: Decompression failed\n");
-                            conn->is_html = false;
-                            bool should_retry;
-                            int written = ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf,
-                                                                to_forward, &should_retry);
-                            if (written < 0) return false;
-                            
-                            // Consume the data
-                            conn->tunnel_body_remaining -= to_forward;
-                            
-                            if (to_forward < conn->tunnel_buf_offset) {
-                                memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
-                                        conn->tunnel_buf_offset - to_forward);
-                                conn->tunnel_buf_offset -= to_forward;
-                            } else {
-                                conn->tunnel_buf_offset = 0;
-                            }
-                            break;
-                        }
-                        
-                        // CRITICAL: Always consume compressed bytes from buffer and counter
-                        conn->tunnel_body_remaining -= to_forward;
-                        
-                        // Move remaining data in buffer
-                        if (to_forward < conn->tunnel_buf_offset) {
-                            memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
-                                    conn->tunnel_buf_offset - to_forward);
-                            conn->tunnel_buf_offset -= to_forward;
-                        } else {
-                            conn->tunnel_buf_offset = 0;
-                        }
-                        
-                        // If decompression produced no output yet, just return and wait for more input
-                        if (decompressed_len == 0) {
-                            fprintf(stderr, "DEBUG: Decompressor needs more input (remaining=%d)\n", 
-                                    conn->tunnel_body_remaining);
-                            
-                            // If we've consumed all compressed data but got no output, 
-                            // we might be at the end - check if done
-                            if (conn->tunnel_body_remaining <= 0) {
-                                fprintf(stderr, "DEBUG: All compressed data consumed, finalizing\n");
-                                goto body_complete;
-                            }
-                            
-                            return true;
-                        }
-                        
-                        data_to_process = conn->decompress_buffer;
-                        data_len = decompressed_len;
-                        
-                        fprintf(stderr, "DEBUG: Decompressed %d -> %d bytes (remaining compressed: %d)\n", 
-                                to_forward, decompressed_len, conn->tunnel_body_remaining);
-                    } else {
-                        // === NOT COMPRESSED: Use data from tunnel_buf directly ===
-                        // Don't consume yet - we'll do that after we know what data_to_process is
-                        data_to_process = conn->tunnel_buf;
-                        data_len = to_forward;
-                        
-                        // NOW consume the data
-                        conn->tunnel_body_remaining -= to_forward;
-                        
-                        if (to_forward < conn->tunnel_buf_offset) {
-                            memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
-                                    conn->tunnel_buf_offset - to_forward);
-                            conn->tunnel_buf_offset -= to_forward;
-                        } else {
-                            conn->tunnel_buf_offset = 0;
-                        }
-                    }
-                    
-                    // === INJECTION LOGIC (same for both compressed and uncompressed) ===
-                    if (!conn->chatbot_injected) {
-                        buffer_append(conn, data_to_process, data_len);
-                        
-                        char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
-                        
-                        if (body_pos) {
-                            // Found <body> - inject immediately
-                            int before_body = body_pos - conn->LLM_buf;
-                            
-                            fprintf(stderr, "DEBUG: Found <body> in HTTPS at offset %d (total buffered: %d)\n", 
-                                    before_body, conn->html_offset);
-                            
-                            // Send headers
-                            if (conn->response_headers && !conn->header_sent_to_client) {
-                                bool should_retry;
-                                const char *injection = "\r\nX-Proxy:CS112\r\n\r\n";
-                                int headers_without_end = conn->response_headers_len - 2;
-                                ssl_write_with_retry(conn->client_ssl, conn->response_headers,
-                                        headers_without_end, &should_retry);
-                                ssl_write_with_retry(conn->client_ssl, injection,
-                                        strlen(injection), &should_retry);
-                                conn->header_sent_to_client = true;
-                            }
-                            
-                            // Send before <body>
-                            bool should_retry;
-                            ssl_write_with_retry(conn->client_ssl, conn->LLM_buf,
-                                    before_body, &should_retry);
-                            
-                            // Inject chatbot
-                            char *snippet = generate_chatbot_snippet(conn->client_fd);
-                            ssl_write_with_retry(conn->client_ssl, snippet,
-                                    strlen(snippet), &should_retry);
-                            free(snippet);
-                            
-                            // Send rest
-                            int after_body = conn->html_offset - before_body;
-                            ssl_write_with_retry(conn->client_ssl, body_pos,
-                                    after_body, &should_retry);
-                            
-                            conn->chatbot_injected = true;
-                            
-                        } else {
-                            // === STREAM SAFE PORTION ===
-                            const int SAFETY_MARGIN = 10;
-                            
-                            if (conn->html_offset > SAFETY_MARGIN) {
-                                int safe_to_send = conn->html_offset - SAFETY_MARGIN;
-                                
-                                // Send headers first time only
-                                if (!conn->header_sent_to_client) {
-                                    if (conn->response_headers) {
-                                        bool should_retry;
-                                        const char *injection = "\r\nX-Proxy:CS112\r\n\r\n";
-                                        int headers_without_end = conn->response_headers_len - 2;
-                                        ssl_write_with_retry(conn->client_ssl, conn->response_headers,
-                                                    headers_without_end, &should_retry);
-                                        ssl_write_with_retry(conn->client_ssl, injection,
-                                                    strlen(injection), &should_retry);
-                                    }
-                                    conn->header_sent_to_client = true;
-                                }
-                                
-                                // Send safe portion
-                                bool should_retry;
-                                ssl_write_with_retry(conn->client_ssl, conn->LLM_buf,
-                                            safe_to_send, &should_retry);
-                                
-                                fprintf(stderr, "DEBUG: HTTPS streamed %d bytes (keeping %d in buffer)\n", 
-                                        safe_to_send, SAFETY_MARGIN);
-                                
-                                // Keep last SAFETY_MARGIN bytes
-                                memmove(conn->LLM_buf, conn->LLM_buf + safe_to_send, SAFETY_MARGIN);
-                                conn->html_offset = SAFETY_MARGIN;
-                            }
-                        }
-                    } else {
-                        // Already injected - forward immediately and accumulate for LLM
-                        bool should_retry;
-                        ssl_write_with_retry(conn->client_ssl, data_to_process,
-                                    data_len, &should_retry);
-                        buffer_append(conn, data_to_process, data_len);
-                    }
+                    // === JUST ACCUMULATE - DON'T DECOMPRESS OR INJECT YET ===
+                    buffer_append(conn, conn->tunnel_buf, to_forward);
+                    fprintf(stderr, "DEBUG: Accumulated %d bytes (total: %d, remaining: %d)\n",
+                            to_forward, conn->html_offset, conn->tunnel_body_remaining - to_forward);
                 } else {
                     // Non-HTML: forward immediately
                     bool should_retry;
-                    int written = ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf,
-                                                        to_forward, &should_retry);
-                    if (written < 0) return false;
-                    
-                    // CRITICAL: Consume the data
-                    conn->tunnel_body_remaining -= to_forward;
-                    
-                    // Move excess data
-                    if (to_forward < conn->tunnel_buf_offset) {
-                        memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
-                                conn->tunnel_buf_offset - to_forward);
-                        conn->tunnel_buf_offset -= to_forward;
-                    } else {
-                        conn->tunnel_buf_offset = 0;
-                    }
-                    
-                    fprintf(stderr, "DEBUG: Forwarded non-HTML %d bytes, remaining=%d\n", 
-                            to_forward, conn->tunnel_body_remaining);
+                    ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf, to_forward, &should_retry);
                 }
                 
-            body_complete:
-                // Check if complete
+                // Consume the data
+                conn->tunnel_body_remaining -= to_forward;
+                
+                if (to_forward < conn->tunnel_buf_offset) {
+                    memmove(conn->tunnel_buf, conn->tunnel_buf + to_forward,
+                            conn->tunnel_buf_offset - to_forward);
+                    conn->tunnel_buf_offset -= to_forward;
+                } else {
+                    conn->tunnel_buf_offset = 0;
+                }
+                
+                // === PROCESS AT THE END WHEN COMPLETE ===
                 if (conn->tunnel_body_remaining <= 0) {
-                    fprintf(stderr, "DEBUG: HTTPS response complete (html=%d, html_offset=%d, injected=%d)\n",
-                            conn->is_html, conn->html_offset, conn->chatbot_injected);
+                    fprintf(stderr, "DEBUG: Known-length response complete\n");
                     
-                    // Send any remaining buffered data
-                    if (conn->is_html) {
-                        bool should_retry;
-                        // HTML-specific cleanup
-                        if (conn->html_offset > 0 && !conn->chatbot_injected) {
-                            fprintf(stderr, "DEBUG: Sending remaining buffered HTML without injection (%d bytes)\n",
-                                    conn->html_offset);
+                    if (conn->is_html && conn->html_offset > 0) {
+                        fprintf(stderr, "DEBUG: Starting final processing - accumulated %d bytes (compressed=%d)\n",
+                                conn->html_offset, conn->is_compressed);
+                        
+                        // === STEP 1: DECOMPRESS EVERYTHING AT ONCE ===
+                        if (conn->is_compressed) {
+                            fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                             
-                            if (conn->response_headers && !conn->header_sent_to_client) {
-                                const char *injection = "\r\nX-Proxy:CS112\r\n\r\n";
-                                int headers_without_end = conn->response_headers_len - 2;
-                                ssl_write_with_retry(conn->client_ssl, conn->response_headers,
-                                            headers_without_end, &should_retry);
-                                ssl_write_with_retry(conn->client_ssl, injection,
-                                            strlen(injection), &should_retry);
+                            if (!decompress_and_store(conn)) {
+                                fprintf(stderr, "ERROR: Final decompression failed\n");
+                                return false;
                             }
-                            ssl_write_with_retry(conn->client_ssl, conn->LLM_buf,
-                                        conn->html_offset, &should_retry);
-                        } else if (conn->html_offset > 0 && conn->chatbot_injected) {
-                            // Send any remaining data after injection
-                            fprintf(stderr, "DEBUG: Sending final buffered chunk (%d bytes)\n", conn->html_offset);
-                            ssl_write_with_retry(conn->client_ssl, conn->LLM_buf,
-                                        conn->html_offset, &should_retry);
+                            
+                            fprintf(stderr, "DEBUG: Decompressed to %d bytes\n", conn->html_offset);
+                            conn->is_compressed = false;
                         }
                         
-                        // Send to LLM
-                        if (conn->html_offset > 0) {
-                            fprintf(stderr, "DEBUG: Sending %d bytes to LLM\n", conn->html_offset);
-                            send_to_llm(conn, 9450);
+                        // === STEP 2: SEARCH FOR <BODY> AND INJECT ===
+                        char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
+                        
+                        int injected_len = 0;
+                        char *final_html = NULL;
+                        
+                        if (body_pos) {
+                            fprintf(stderr, "DEBUG: Found <body> tag, injecting chatbot\n");
+                            
+                            final_html = inject_chatbot_into_html(conn->LLM_buf, conn->html_offset, 
+                                                                &injected_len, conn->client_fd);
+                            
+                            if (!final_html) {
+                                fprintf(stderr, "ERROR: Chatbot injection failed\n");
+                                final_html = conn->LLM_buf;
+                                injected_len = conn->html_offset;
+                            }
+                        } else {
+                            fprintf(stderr, "DEBUG: No <body> found, sending without injection\n");
+                            final_html = conn->LLM_buf;
+                            injected_len = conn->html_offset;
                         }
                         
-                        // Cleanup decompressor
-                        if (conn->gzip_stream) {
-                            inflateEnd(conn->gzip_stream);
-                            free(conn->gzip_stream);
-                            conn->gzip_stream = NULL;
-                        }
-                        if (conn->brotli_state) {
-                            BrotliDecoderDestroyInstance(conn->brotli_state);
-                            conn->brotli_state = NULL;
+                        // === STEP 3: SEND HEADERS WITH CONTENT-LENGTH ===
+                        if (conn->response_headers) {
+                            char *updated_headers = update_content_length_header(conn->response_headers,
+                                                                                conn->response_headers_len,
+                                                                                injected_len);
+                            bool should_retry;
+                            const char *injection = "X-Proxy:CS112\r\n\r\n";
+                            int headers_without_end = strlen(updated_headers) - 2;
+                            
+                            ssl_write_with_retry(conn->client_ssl, updated_headers,
+                                        headers_without_end, &should_retry);
+                            ssl_write_with_retry(conn->client_ssl, injection,
+                                        strlen(injection), &should_retry);
+                            
+                            free(updated_headers);
                         }
                         
-                        conn->html_offset = 0;
-                        conn->is_html = false;
-                        conn->is_compressed = false;
-                        conn->chatbot_injected = false;
-                        conn->decompression_initialized = false;
-                        conn->header_sent_to_client = false;
+                        // === STEP 4: SEND ENTIRE HTML TO CLIENT ===
+                        bool should_retry;
+                        ssl_write_with_retry(conn->client_ssl, final_html, 
+                                            injected_len, &should_retry);
+                        
+                        fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
+                        
+                        // === STEP 5: SEND TO LLM ===
+                        if (final_html != conn->LLM_buf) {
+                            free(conn->LLM_buf);
+                            conn->LLM_buf = final_html;
+                            conn->html_offset = injected_len;
+                            conn->LLM_buf_capacity = injected_len + 1;
+                        }
+                        
+                        send_to_llm(conn, 9450);
                     }
                     
-                    // ALWAYS reset tunnel state for next response (HTML or not)
+                    // === CLEANUP ===
+                    conn->html_offset = 0;
+                    conn->is_html = false;
+                    conn->is_compressed = false;
+                    conn->decompression_initialized = false;
+                    conn->chatbot_injected = false;
+                    conn->header_sent_to_client = false;
                     conn->tunnel_state = TUNNEL_EXPECT_RESPONSE_HEADERS;
                 }
+                
                 break;
             }
 
