@@ -43,17 +43,14 @@ as a general-purpose chatbot.
 
     1. git clone https://github.com/ellayipinghou/cs112_final
        cd cs112_final-main
-    
     2. make clean && make
-
     3. install python3.11 and system dependencies 
-
     4. in a terminal, run ./proxy <listen_port> <ca_cert_path> <ca_key_path>
-    
     5. in another terminal, run python3 app.py
 
 
-## Firefox: Settings → Network Settings → Manual proxy → `127.0.0.1:<YOUR PORT>`
+## Configure Browser with Proxy: 
+Firefox: Settings → Network Settings → Manual proxy → `127.0.0.1:<YOUR PORT>`
 
 ## Install CA Certificate:
     Export `proxy_ca.crt` as `.crt` and import into browser's certificate store.
