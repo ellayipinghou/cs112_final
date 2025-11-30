@@ -27,6 +27,18 @@
 #define HTML_BUFFER_SIZE 524288
 #define TUNNEL_BUFFER_SIZE 262144
 
+// cache for certificates
+struct CertCacheEntry {
+    char *hostname;
+    X509 *cert;
+    EVP_PKEY *pkey;
+    time_t created_at;
+    struct CertCacheEntry *next;
+};
+
+static struct CertCacheEntry *cert_cache = NULL;
+static const int CACHE_MAX_AGE = 3600; // 1 hour
+
 // phases describing proxy state machine
 enum ReadPhase {
     // shared states
@@ -104,6 +116,7 @@ struct Connection {
     int compressed_bytes_consumed;
 };
 
+
 // global mapping from file descriptors to connections
 struct Connection *fd_to_connection[FD_SETSIZE];
 
@@ -126,6 +139,8 @@ bool setup_connect_request(int fd, char *host, char *port, fd_set *all_fds);
 X509 *load_ca_cert(char *path);
 EVP_PKEY *load_ca_key(char *path);
 X509 *generate_cert(char *hostname, X509 *ca_cert, EVP_PKEY *ca_key, EVP_PKEY **out_pkey);
+X509 *get_or_generate_cert(char *hostname, X509 *ca_cert, EVP_PKEY *ca_key, EVP_PKEY **out_pkey); // cache lookup or generate
+static void free_cert_cache(void);
 bool handle_tls_handshake_client(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key);
 bool handle_tls_handshake_server(int fd, fd_set *all_fds);
 int ssl_read_with_retry(SSL *ssl, void *buf, int num, bool *should_retry);
@@ -308,8 +323,93 @@ int main(int argc, char *argv[]) {
             }
         }
     }
-
+    free_cert_cache();
     return 0;
+}
+
+// Helper: Remove from cache
+static void remove_cache_entry(struct CertCacheEntry *prev, struct CertCacheEntry *entry) {
+    if (prev) {
+        prev->next = entry->next;
+    } else {
+        cert_cache = entry->next;  // removing head
+    }
+    
+    // free resources
+    free(entry->hostname);
+    X509_free(entry->cert);
+    EVP_PKEY_free(entry->pkey);
+    free(entry);
+}
+
+// Helper: Find cached cert
+static struct CertCacheEntry *find_cached_cert(const char *hostname) {
+    struct CertCacheEntry *entry = cert_cache;
+    struct CertCacheEntry *prev = NULL;
+    time_t now = time(NULL);
+    
+    while (entry) {
+        if (strcmp(entry->hostname, hostname) == 0) {
+            // check if expired
+            if (now - entry->created_at < CACHE_MAX_AGE) {
+                return entry;  // valid cached entry
+            }
+            // expired - remove from cache
+            struct CertCacheEntry *next = entry->next;
+            remove_cache_entry(prev, entry);
+            return NULL;
+        }
+        prev = entry;
+        entry = entry->next;
+    }
+    return NULL;
+}
+
+// Helper: Add to cache
+static void add_to_cache(const char *hostname, X509 *cert, EVP_PKEY *pkey) { 
+    struct CertCacheEntry *entry = malloc(sizeof(struct CertCacheEntry));
+    entry->hostname = strdup(hostname);
+    entry->cert = cert;
+    entry->pkey = pkey;
+    entry->created_at = time(NULL);
+    entry->next = cert_cache;
+    cert_cache = entry;
+    
+    // increment reference counts 
+    X509_up_ref(cert);
+    EVP_PKEY_up_ref(pkey);
+}
+
+// generate_cert 
+X509 *get_or_generate_cert(char *hostname, X509 *ca_cert, EVP_PKEY *ca_key, EVP_PKEY **out_pkey) {
+    // check cache first
+    struct CertCacheEntry *cached = find_cached_cert(hostname);
+    if (cached) {
+        *out_pkey = cached->pkey;
+        X509_up_ref(cached->cert);  // increment ref for caller
+        EVP_PKEY_up_ref(cached->pkey);
+        return cached->cert;
+    }
+    
+    // not in cache - generate new
+    X509 *cert = generate_cert(hostname, ca_cert, ca_key, out_pkey);
+    if (cert && *out_pkey) {
+        add_to_cache(hostname, cert, *out_pkey);
+    }
+    
+    return cert;
+}
+
+// Helper: Free cache
+static void free_cert_cache(void) {
+    while (cert_cache) {
+        struct CertCacheEntry *next = cert_cache->next;
+        free(cert_cache->hostname);
+        X509_free(cert_cache->cert);
+        EVP_PKEY_free(cert_cache->pkey);
+        free(cert_cache);
+        cert_cache = next;
+    }
 }
 
 // Generate AllRecipes-specific chatbot snippet
@@ -362,6 +462,30 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 ".mitm-suggestion:hover {\n"
 "    background: #fff5f0;\n"
 "}\n"
+".mitm-typing {\n"
+"    display: flex;\n"
+"    align-items: center;\n"
+"    gap: 4px;\n"
+"    padding: 10px 15px;\n"
+"    background: #f1f1f1;\n"
+"    border-radius: 18px;\n"
+"    border-bottom-left-radius: 4px;\n"
+"    width: fit-content;\n"
+"    margin-bottom: 10px;\n"
+"}\n"
+".mitm-dot {\n"
+"    width: 8px;\n"
+"    height: 8px;\n"
+"    background: #90949c;\n"
+"    border-radius: 50%%;\n"
+"    animation: mitm-bounce 1.4s infinite ease-in-out both;\n"
+"}\n"
+".mitm-dot:nth-child(1) { animation-delay: -0.32s; }\n"
+".mitm-dot:nth-child(2) { animation-delay: -0.16s; }\n"
+"@keyframes mitm-bounce {\n"
+"    0%%, 80%%, 100%% { transform: scale(0); }\n"
+"    40%% { transform: scale(1); }\n"
+"}\n"
 "</style>\n"
 "\n"
 "<script>\n"
@@ -389,7 +513,63 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "        }\n"
 "    }\n"
 "\n"
-"    toggle.onclick = toggleChat;\n"
+"    // Draggable functionality\n"
+"    let isDragging = false;\n"
+"    let startX, startY, initialRight, initialTop;\n"
+"\n"
+"    toggle.onmousedown = function(e) {\n"
+"        if (isOpen) return;\n"
+"        isDragging = false;\n"
+"        startX = e.clientX;\n"
+"        startY = e.clientY;\n"
+"        \n"
+"        const rect = toggle.getBoundingClientRect();\n"
+"        initialRight = window.innerWidth - rect.right;\n"
+"        initialTop = rect.top;\n"
+"        \n"
+"        document.onmousemove = function(e) {\n"
+"            if (!isDragging) {\n"
+"                if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) {\n"
+"                    isDragging = true;\n"
+"                    toggle.style.transition = \"none\";\n"
+"                }\n"
+"            }\n"
+"            if (isDragging) {\n"
+"                const deltaX = startX - e.clientX;\n"
+"                const deltaY = e.clientY - startY;\n"
+"                let newRight = initialRight + deltaX;\n"
+"                let newTop = initialTop + deltaY;\n"
+"                \n"
+"                // Boundary checks\n"
+"                const winWidth = document.documentElement.clientWidth || window.innerWidth;\n"
+"                const winHeight = document.documentElement.clientHeight || window.innerHeight;\n"
+"                const elemWidth = toggle.offsetWidth;\n"
+"                const elemHeight = toggle.offsetHeight;\n"
+"                \n"
+"                const maxRight = winWidth - elemWidth;\n"
+"                const maxTop = winHeight - elemHeight;\n"
+"                \n"
+"                if (newRight < 0) newRight = 0;\n"
+"                if (newRight > maxRight) newRight = maxRight;\n"
+"                if (newTop < 0) newTop = 0;\n"
+"                if (newTop > maxTop) newTop = maxTop;\n"
+"                \n"
+"                toggle.style.right = newRight + \"px\";\n"
+"                toggle.style.top = newTop + \"px\";\n"
+"            }\n"
+"        };\n"
+"        \n"
+"        document.onmouseup = function() {\n"
+"            document.onmousemove = null;\n"
+"            document.onmouseup = null;\n"
+"            if (isDragging) {\n"
+"                toggle.style.transition = \"all 0.3s ease\";\n"
+"                setTimeout(() => isDragging = false, 0);\n"
+"            }\n"
+"        };\n"
+"    };\n"
+"\n"
+"    toggle.onclick = function() { if (!isDragging) toggleChat(); };\n"
 "    input.onfocus = () => input.style.borderColor = \"#e85d04\";\n"
 "    input.onblur = () => input.style.borderColor = \"#e1e4e8\";\n"
 "\n"
@@ -481,6 +661,22 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "        box.scrollTop = box.scrollHeight;\n"
 "    } catch(e) {}\n"
 "\n"
+"    function showTyping() {\n"
+"        const id = \"mitm-typing-indicator\";\n"
+"        if (document.getElementById(id)) return;\n"
+"        const div = document.createElement(\"div\");\n"
+"        div.id = id;\n"
+"        div.className = \"mitm-typing\";\n"
+"        div.innerHTML = '<div class=\"mitm-dot\"></div><div class=\"mitm-dot\"></div><div class=\"mitm-dot\"></div>';\n"
+"        box.appendChild(div);\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"    }\n"
+"\n"
+"    function hideTyping() {\n"
+"        const el = document.getElementById(\"mitm-typing-indicator\");\n"
+"        if (el) el.remove();\n"
+"    }\n"
+"\n"
 "    // Show suggestions on load\n"
 "    appendSuggestions();\n"
 "\n"
@@ -491,6 +687,7 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "        this.value = \"\";\n"
 "\n"
 "        appendMessage(\"You\", msg);\n"
+"        showTyping();\n"
 "\n"
 "        try {\n"
 "            let resp = await fetch(\"http://localhost:9450/query\", {\n"
@@ -499,9 +696,11 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
 "                body: JSON.stringify({ query: msg })\n"
 "            });\n"
 "            let data = await resp.json();\n"
+"            hideTyping();\n"
 "            appendMessage(\"Bot\", data.text);\n"
 "            appendSuggestions();\n"
 "        } catch(err) {\n"
+"            hideTyping();\n"
 "            appendMessage(\"Bot\", \"Error connecting to server\");\n"
 "        }\n"
 "    });\n"
@@ -512,12 +711,12 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
     return snippet;
 }
 
-// Generate chatbot snippet with actual client FD
+// Generate generic chatbot snippet with actual client FD
 char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
     if (is_allrecipes) {
         return generate_allrecipes_chatbot_snippet(client_fd);
     }
-    // Allocate buffer - should be plenty for the HTML + script
+    // allocate buffer - should be plenty for the HTML + script
     char *snippet = malloc(16384);
     if (!snippet) return NULL;
 
@@ -549,6 +748,33 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 " </div>\n"
 "</div>\n"
 "\n"
+"<style>\n"
+".mitm-typing {\n"
+"    display: flex;\n"
+"    align-items: center;\n"
+"    gap: 4px;\n"
+"    padding: 10px 15px;\n"
+"    background: #f1f1f1;\n"
+"    border-radius: 18px;\n"
+"    border-bottom-left-radius: 4px;\n"
+"    width: fit-content;\n"
+"    margin-bottom: 10px;\n"
+"}\n"
+".mitm-dot {\n"
+"    width: 8px;\n"
+"    height: 8px;\n"
+"    background: #90949c;\n"
+"    border-radius: 50%%;\n"
+"    animation: mitm-bounce 1.4s infinite ease-in-out both;\n"
+"}\n"
+".mitm-dot:nth-child(1) { animation-delay: -0.32s; }\n"
+".mitm-dot:nth-child(2) { animation-delay: -0.16s; }\n"
+"@keyframes mitm-bounce {\n"
+"    0%%, 80%%, 100%% { transform: scale(0); }\n"
+"    40%% { transform: scale(1); }\n"
+"}\n"
+"</style>\n"
+"\n"
 "<script>\n"
 "(function() {\n"
 "    const toggle = document.getElementById(\"mitm-chat-toggle\");\n"
@@ -574,7 +800,63 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "        }\n"
 "    }\n"
 "\n"
-"    toggle.onclick = toggleChat;\n"
+"    // Draggable functionality\n"
+"    let isDragging = false;\n"
+"    let startX, startY, initialRight, initialTop;\n"
+"\n"
+"    toggle.onmousedown = function(e) {\n"
+"        if (isOpen) return;\n"
+"        isDragging = false;\n"
+"        startX = e.clientX;\n"
+"        startY = e.clientY;\n"
+"        \n"
+"        const rect = toggle.getBoundingClientRect();\n"
+"        initialRight = window.innerWidth - rect.right;\n"
+"        initialTop = rect.top;\n"
+"        \n"
+"        document.onmousemove = function(e) {\n"
+"            if (!isDragging) {\n"
+"                if (Math.abs(e.clientX - startX) > 5 || Math.abs(e.clientY - startY) > 5) {\n"
+"                    isDragging = true;\n"
+"                    toggle.style.transition = \"none\";\n"
+"                }\n"
+"            }\n"
+"            if (isDragging) {\n"
+"                const deltaX = startX - e.clientX;\n"
+"                const deltaY = e.clientY - startY;\n"
+"                let newRight = initialRight + deltaX;\n"
+"                let newTop = initialTop + deltaY;\n"
+"                \n"
+"                // Boundary checks\n"
+"                const winWidth = document.documentElement.clientWidth || window.innerWidth;\n"
+"                const winHeight = document.documentElement.clientHeight || window.innerHeight;\n"
+"                const elemWidth = toggle.offsetWidth;\n"
+"                const elemHeight = toggle.offsetHeight;\n"
+"                \n"
+"                const maxRight = winWidth - elemWidth;\n"
+"                const maxTop = winHeight - elemHeight;\n"
+"                \n"
+"                if (newRight < 0) newRight = 0;\n"
+"                if (newRight > maxRight) newRight = maxRight;\n"
+"                if (newTop < 0) newTop = 0;\n"
+"                if (newTop > maxTop) newTop = maxTop;\n"
+"                \n"
+"                toggle.style.right = newRight + \"px\";\n"
+"                toggle.style.top = newTop + \"px\";\n"
+"            }\n"
+"        };\n"
+"        \n"
+"        document.onmouseup = function() {\n"
+"            document.onmousemove = null;\n"
+"            document.onmouseup = null;\n"
+"            if (isDragging) {\n"
+"                toggle.style.transition = \"all 0.3s ease\";\n"
+"                setTimeout(() => isDragging = false, 0);\n"
+"            }\n"
+"        };\n"
+"    };\n"
+"\n"
+"    toggle.onclick = function() { if (!isDragging) toggleChat(); };\n"
 "\n"
 "    // Add focus effect to input\n"
 "    input.onfocus = () => input.style.borderColor = \"#007bff\";\n"
@@ -644,6 +926,22 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "        saveMsg(sender, text); // Save original raw text\n"
 "    }\n"
 "\n"
+"    function showTyping() {\n"
+"        const id = \"mitm-typing-indicator\";\n"
+"        if (document.getElementById(id)) return;\n"
+"        const div = document.createElement(\"div\");\n"
+"        div.id = id;\n"
+"        div.className = \"mitm-typing\";\n"
+"        div.innerHTML = '<div class=\"mitm-dot\"></div><div class=\"mitm-dot\"></div><div class=\"mitm-dot\"></div>';\n"
+"        box.appendChild(div);\n"
+"        box.scrollTop = box.scrollHeight;\n"
+"    }\n"
+"\n"
+"    function hideTyping() {\n"
+"        const el = document.getElementById(\"mitm-typing-indicator\");\n"
+"        if (el) el.remove();\n"
+"    }\n"
+"\n"
 "    loadChat();\n"
 "\n"
 "    input.addEventListener(\"keydown\", async function(e) {\n"
@@ -653,6 +951,7 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "        this.value = \"\";\n"
 "\n"
 "        appendMessage(\"You\", msg);\n"
+"        showTyping();\n"
 "\n"
 "        try {\n"
 "            let resp = await fetch(\"http://localhost:9450/query\", {\n"
@@ -661,8 +960,10 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 "                body: JSON.stringify({ query: msg })\n"
 "            });\n"
 "            let data = await resp.json();\n"
+"            hideTyping();\n"
 "            appendMessage(\"Bot\", data.text);\n"
 "        } catch(err) {\n"
+"            hideTyping();\n"
 "            appendMessage(\"Bot\", \"Error connecting to server\");\n"
 "        }\n"
 "    });\n"
@@ -675,7 +976,6 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
 
 // Update Content-Length header in stored response headers
 // Removes compressed header field
-// Returns modified headers string (caller must free)
 char *update_content_length_header(const char *headers, int headers_len, int new_content_len) {
     char *temp = malloc(headers_len + 100);  // Extra space for safety
     memcpy(temp, headers, headers_len);
@@ -683,21 +983,21 @@ char *update_content_length_header(const char *headers, int headers_len, int new
     
     int current_len = headers_len;
     
-    // Remove Content-Encoding line if present
+    // remove Content-Encoding line if present
     char *ce_start = strstr(temp, "Content-Encoding:");
     if (ce_start) {
         char *ce_end = strstr(ce_start, "\r\n");
         if (ce_end) {
-            // Calculate how much to remove (including \r\n)
+            // calculate how much to remove (including \r\n)
             int remove_len = (ce_end + 2) - ce_start;
-            // Move everything after this line forward
+            // move everything after this line forward
             memmove(ce_start, ce_end + 2, strlen(ce_end + 2) + 1);
             current_len -= remove_len;
             temp[current_len] = '\0';
         }
     }
 
-    // Remove Transfer-Encoding line if present (since we are sending raw body with Content-Length)
+    // remove Transfer-Encoding line if present (since we are sending raw body with Content-Length)
     char *te_start = strstr(temp, "Transfer-Encoding:");
     if (te_start) {
         char *te_end = strstr(te_start, "\r\n");
@@ -709,25 +1009,24 @@ char *update_content_length_header(const char *headers, int headers_len, int new
         }
     }
     
-    // Change "Connection: close" to "Connection: keep-alive" if present
+    // change "Connection: close" to "Connection: keep-alive" if present
     char *conn_close = strstr(temp, "Connection: close");
     if (conn_close) {
-        memcpy(conn_close + 12, "keep-alive", 10);  // Overwrite "close" with "keep-alive"
+        memcpy(conn_close + 12, "keep-alive", 10);  // overwrite "close" with "keep-alive"
     }
 
-    // Find Content-Length
+    // find Content-Length
     char *cl_start = strstr(temp, "Content-Length:");
     
     if (!cl_start) {
-        // === NEW: Content-Length doesn't exist, ADD IT ===
-        // Find the end of headers (\r\n\r\n)
+        // Content-Length doesn't exist, ADD IT ===
         char *headers_end = strstr(temp, "\r\n\r\n");
         if (!headers_end) {
             free(temp);
             return strdup(headers);
         }
         
-        // Insert before final \r\n\r\n
+        // insert before final \r\n\r\n
         int insert_pos = headers_end - temp;
         char new_cl[128];
         snprintf(new_cl, sizeof(new_cl), "Content-Length: %d\r\n", new_content_len);
@@ -759,35 +1058,9 @@ char *update_content_length_header(const char *headers, int headers_len, int new
     
     int after_len = current_len - (cl_end - temp);
     int new_headers_len = before_len + strlen(new_cl_line) + after_len;
-    
-    // Find and update Content-Length line
-    // char *cl_start = strstr(temp, "Content-Length:");
-    // if (!cl_start) {
-    //     free(temp);
-    //     return strdup(headers);
-    // }
-    
-    // // Find the end of the Content-Length line
-    // char *cl_end = strstr(cl_start, "\r\n");
-    // if (!cl_end) {
-    //     free(temp);
-    //     return strdup(headers);
-    // }
-    
-    // // Build new header with updated Content-Length
-    // int before_len = cl_start - temp;
-    // char *after_cl = cl_end;  // Start of what comes after CL line
-    
-    // char new_cl_line[128];
-    // snprintf(new_cl_line, sizeof(new_cl_line), "Content-Length: %d", new_content_len);
-    
-    // // Calculate new total length
-    // int after_len = current_len - (cl_end - temp);
-    // int new_headers_len = before_len + strlen(new_cl_line) + after_len;
-    
     char *new_headers = malloc(new_headers_len + 1);
     
-    // Copy: before CL line + new CL line + after CL line
+    // copy: before CL line + new CL line + after CL line
     memcpy(new_headers, temp, before_len);
     memcpy(new_headers + before_len, new_cl_line, strlen(new_cl_line));
     memcpy(new_headers + before_len + strlen(new_cl_line), after_cl, after_len);
@@ -799,17 +1072,15 @@ char *update_content_length_header(const char *headers, int headers_len, int new
 
 // inject CHATBOT_SNIPPET after <body tag in HTML content
 // returns allocated buffer with injected content, or NULL on failure
-// caller must free the returned buffer
 char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int client_fd) {
     struct Connection *conn = fd_to_connection[client_fd];
+    // generate chatbot snippet
     char *CHATBOT_SNIPPET = NULL;
     if (conn->hostname && strcmp(conn->hostname, "www.allrecipes.com") == 0) {
         CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd, true);
     } else {
         CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd, false);
     }
-    // Generate snippet with actual FD
-    //char *CHATBOT_SNIPPET = generate_chatbot_snippet(client_fd);
     if (!CHATBOT_SNIPPET) return NULL;
     
     // find <body tag (case-insensitive, could be <body>, <body attr="...">)
@@ -879,7 +1150,7 @@ char *inject_chatbot_into_html(const char *html, int html_len, int *out_len, int
     fprintf(stderr, "DEBUG: Injected chatbot (original=%d, injected=%d, insert_offset=%d, client_fd=%d)\n", 
             html_len, new_len, snippet_insert_offset, client_fd);
 
-    free(CHATBOT_SNIPPET);  // Free the generated snippet
+    free(CHATBOT_SNIPPET);
     *out_len = new_len;
     return injected;
 }
@@ -889,7 +1160,7 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         return true;
     }
 
-    // Decompress if needed
+    // decompress if needed
     if (conn->is_compressed) {
         if (!decompress_and_store(conn)) {
             fprintf(stderr, "ERROR: Failed to decompress HTML\n");
@@ -897,14 +1168,14 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         }
     }
     
-    // Create socket
+    // create socket
     int llm_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (llm_fd < 0) {
         perror("Failed to create LLM socket");
         return false;
     }
     
-    // Connect to Flask
+    // connect to Flask
     struct sockaddr_in llm_addr;
     memset(&llm_addr, 0, sizeof(llm_addr));
     llm_addr.sin_family = AF_INET;
@@ -917,7 +1188,7 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         return false;
     }
     
-    // Build HTTP POST request header (send raw HTML, not JSON)
+    // build HTTP POST request header (send raw HTML, not JSON)
     char header[1024];
     snprintf(header, sizeof(header),
              "POST /upload_html HTTP/1.1\r\n"
@@ -930,7 +1201,7 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
              "\r\n",
              llm_port, conn->client_fd, conn->url, conn->html_offset); // TODO: change to client_fd
     
-    // Send header
+    // send header
     int sent = write(llm_fd, header, strlen(header));
     if (sent < 0) {
         perror("Failed to send header to Flask");
@@ -938,7 +1209,7 @@ bool send_to_llm(struct Connection *conn, int llm_port) {
         return false;
     }
     
-    // Send HTML body directly (no JSON encoding needed!)
+    // send HTML body directly (no JSON encoding needed!)
     sent = write(llm_fd, conn->LLM_buf, conn->html_offset);
     if (sent < 0) {
         perror("Failed to send body to Flask");
@@ -1076,14 +1347,14 @@ bool read_request(int fd, fd_set *all_fds) {
 
     if (!success) return false;
 
-    // Construct full URL for HTTP/HTTPS, give to LLM for context
+    // construct full URL for HTTP/HTTPS, give to LLM for context
     if (!is_connect && host && path) {
         if (conn->url) free(conn->url);
         
-        // Determine scheme
+        // determine scheme
         const char *scheme = conn->is_https ? "https" : "http";
         
-        // Construct URL
+        // construct URL
         conn->url = malloc(strlen(scheme) + strlen(host) + strlen(path) + 20);
         if (strcmp(port, "80") == 0 || strcmp(port, "443") == 0) {
             // Omit default ports
@@ -1116,16 +1387,16 @@ bool setup_connect_request(int fd, char *host, char *port, fd_set *all_fds) {
 
     if (is_ad_domain(host)) {
         fprintf(stderr, "DEBUG: Blocking ad domain: %s\n", host);
-        // Send connection established to keep browser happy
+        // send connection established to keep browser happy
         char *response = "HTTP/1.1 200 Connection Established\r\n\r\n";
         write(conn->client_fd, response, strlen(response));
-        return false;  // Close connection immediately
+        return false;  // close connection immediately
     }
     
-    // Create initial URL for the host
+    // create initial URL for the host
     if (conn->url) free(conn->url);
     if (strcmp(port, "443") == 0) {
-        // Default HTTPS port - omit from URL
+        // default HTTPS port - omit from URL
         conn->url = malloc(strlen(host) + 20);
         sprintf(conn->url, "https://%s", host);
     } else {
@@ -1191,7 +1462,8 @@ bool handle_tls_handshake_client(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKE
     if (!conn->client_ssl) {
         // generate certificate for target hostname
         EVP_PKEY *new_pkey = NULL;
-        X509 *new_cert = generate_cert(conn->hostname, ca_cert, ca_key, &new_pkey);
+        // add cache here 
+        X509 *new_cert = get_or_generate_cert(conn->hostname, ca_cert, ca_key, &new_pkey);
         if (!new_cert || !new_pkey) return false;
 
         SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
@@ -1801,7 +2073,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                     fprintf(stderr, "ERROR: Failed to write body: %s\n", strerror(errno));
                 }
                 
-                // ADD THIS: Verify total bytes sent
+                // Verify total bytes sent
                 fprintf(stderr, "DEBUG: Total sent should be: %d + %zu + %d = %d bytes\n",
                         headers_without_end, strlen(injection), injected_len,
                         headers_without_end + (int)strlen(injection) + injected_len);
@@ -2209,7 +2481,8 @@ bool parse_response_header(char *header_buf, int *content_len, bool *is_chunked,
                 // fprintf(stderr, "in parse response, html is true\n");
                 *is_html = true;
             }
-        } else if (strncasecmp(line, "Content-Encoding:", 17) == 0) {  // ADD THIS
+        // Check Content-Encoding
+        } else if (strncasecmp(line, "Content-Encoding:", 17) == 0) {
             if (strstr(line, "gzip") || strstr(line, "deflate") || strstr(line, "br")) {
                 *is_compressed = true;
                 // fprintf(stderr, "in parse, is_compressed is true");
@@ -2860,7 +3133,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         fprintf(stderr, "DEBUG: Starting final processing - accumulated %d bytes (compressed=%d)\n",
                                 conn->html_offset, conn->is_compressed);
                         
-                        // === STEP 1: DECOMPRESS EVERYTHING AT ONCE ===
+                        // Decompress if needed
                         if (conn->is_compressed) {
                             fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                             
@@ -2873,7 +3146,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             conn->is_compressed = false;
                         }
                         
-                        // === STEP 2: SEARCH FOR <BODY> AND INJECT ===
+                        // Search for <body> and inject chatbot
                         char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
                         
                         int injected_len = 0;
@@ -2896,7 +3169,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             injected_len = conn->html_offset;
                         }
                         
-                        // === STEP 3: SEND HEADERS WITH CONTENT-LENGTH ===
+                        // Send headers with updated Content-Length
                         if (conn->response_headers) {
                             char *updated_headers = update_content_length_header(conn->response_headers,
                                                                                 conn->response_headers_len,
@@ -2913,14 +3186,14 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             free(updated_headers);
                         }
                         
-                        // === STEP 4: SEND ENTIRE HTML TO CLIENT ===
+                        // Send entire HTML to client
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, final_html, 
                                             injected_len, &should_retry);
                         
                         fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
                         
-                        // === STEP 5: SEND TO LLM ===
+                        // Send to LLM
                         if (final_html != conn->LLM_buf) {
                             free(conn->LLM_buf);
                             conn->LLM_buf = final_html;
@@ -3029,7 +3302,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         fprintf(stderr, "DEBUG: Starting final processing - accumulated %d bytes (compressed=%d)\n",
                                 conn->html_offset, conn->is_compressed);
                         
-                        // === STEP 1: DECOMPRESS EVERYTHING AT ONCE ===
+                        // Decompress if needed
                         if (conn->is_compressed) {
                             fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                             
@@ -3042,7 +3315,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             conn->is_compressed = false;
                         }
                         
-                        // === STEP 2: SEARCH FOR <BODY> AND INJECT ===
+                        // Search for <body> and inject chatbot
                         char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
                         
                         int injected_len = 0;
@@ -3066,7 +3339,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             injected_len = conn->html_offset;
                         }
                         
-                        // === STEP 3: SEND HEADERS ===
+                        // Send headers
                         if (conn->response_headers) {
                             bool should_retry;
                             const char *injection = "\r\nX-Proxy:CS112\r\n\r\n";
@@ -3078,14 +3351,14 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                                         strlen(injection), &should_retry);
                         }
                         
-                        // === STEP 4: SEND ENTIRE HTML TO CLIENT ===
+                        // Send entire HTML to client
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, final_html, 
                                             injected_len, &should_retry);
                         
                         fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
                         
-                        // === STEP 5: SEND TO LLM ===
+                        // Send to LLM
                         // Update LLM_buf if we created a new buffer for injection
                         if (final_html != conn->LLM_buf) {
                             free(conn->LLM_buf);
@@ -3096,7 +3369,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         
                         send_to_llm(conn, 9450);
                         
-                        // === STEP 6: SEND TERMINATING CHUNK ===
+                        // Send terminating chunk
                         ssl_write_with_retry(conn->client_ssl, "0\r\n\r\n", 5, &should_retry);
                         fprintf(stderr, "DEBUG: Sent terminating chunk\n");
                     } else {
