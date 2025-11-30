@@ -1,0 +1,61 @@
+## Description
+
+This repository contains an HTTP/HTTPS proxy written in C that intercepts and 
+processes web traffic. It performs man-in-the-middle TLS interception and 
+supports both chunked and compressed responses. The proxy can inject a chatbot 
+into HTML pages and skip ad content from known ad domains.
+
+HTML pages are sent to a Flask backend hosting an LLM, allowing users to query 
+the page content directly. When visiting allrecipes.com, the LLM switches to a 
+custom “AllRecipes Chef” mode with tailored suggestions. Otherwise, it functions 
+as a general-purpose chatbot.
+
+## Features
+
+- C-based HTTP/HTTPS proxy
+  - Acts as an intermediary between your browser and websites, handling both regular and secure (HTTPS) connections
+  - Adds a small identifier to each page for tracking purposes (X-Proxy:CS112)
+  - Skips responses from common ad domains, removing most ads from the page
+
+- Chatbot integration
+  - Adds an interactive chatbot directly onto the webpage you’re visiting
+  - Lets you ask questions about the current page and get helpful answers
+  - Remembers the last 5 messages in your conversation, even if you navigate to 
+    a different page
+  - Works as a general assistant on any site, providing useful explanations or guidance
+  - On allrecipes.com, transforms into an “AllRecipes Chef” that gives tailored 
+    suggestions like ingredient substitutions, similar recipes, and cooking tips
+
+## System Dependencies:
+    - OpenSSL
+    - GCC
+    - Python3.11
+    - libz
+    - libbrotlidec
+
+## Python Dependencies 
+    - flask 
+    - beautifulsoup4
+    - urlparse
+    - llm (from tufts github repo)
+
+## Installation Guide
+
+    1. git clone https://github.com/ellayipinghou/cs112_final
+       cd cs112_final-main
+    
+    2. make clean && make
+
+    3. install python3.11 and system dependencies 
+
+    4. in a terminal, run ./proxy <listen_port> <ca_cert_path> <ca_key_path>
+    
+    5. in another terminal, run python3 app.py
+
+
+## Firefox: Settings → Network Settings → Manual proxy → `127.0.0.1:<YOUR PORT>`
+
+## Install CA Certificate:
+    Export `proxy_ca.crt` as `.crt` and import into browser's certificate store.
+
+    Visit any HTTPS site. allrecipes.com shows orange "Chef Bot", other sites show blue "Open Chat".
