@@ -1,4 +1,3 @@
-from typing import Optional, Union, List, Dict, Any
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify
 from llmproxy import generate, text_upload, retrieve
@@ -125,7 +124,7 @@ def query():
         query=user_query,
         session_id=page_session_id,
         rag_threshold=0.1,  # lower threshold = more inclusive
-        rag_k=3  # get top 3 relevant chunks
+        rag_k=5  # get top 5 relevant chunks
     )
 
     if not context_chunks:
@@ -153,7 +152,7 @@ def query():
         system="You are a helpful assistant answering questions about a webpage. Answer the user's questions, using the provided context from the page if relevant.",
         query=f"Page content:\n{context_text}\n\nUser question: {user_query}",
         temperature=0.0,
-        lastk=3,  # Include last 3 messages for conversational context
+        lastk=5,  # Include last 5 messages for conversational context
         session_id=conv_session_id,  # Separate conversation session
     )
 
@@ -163,4 +162,3 @@ def query():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9450)
-
