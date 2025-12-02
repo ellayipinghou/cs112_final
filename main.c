@@ -108,11 +108,11 @@ struct Connection {
     char *url;
     bool chatbot_injected;
 
-    // For streaming decompression
-    z_stream *gzip_stream;          // For gzip decompression
-    BrotliDecoderState *brotli_state; // For brotli decompression
+    // for streaming decompression
+    z_stream *gzip_stream;          // for gzip decompression
+    BrotliDecoderState *brotli_state; // for brotli decompression
     bool decompression_initialized;
-    char decompress_buffer[BUFFER_SIZE]; // Temporary buffer for decompressed chunks
+    char decompress_buffer[BUFFER_SIZE]; // temporary buffer for decompressed chunks
     int compressed_bytes_consumed;
 };
 
@@ -122,17 +122,16 @@ struct Connection *fd_to_connection[FD_SETSIZE];
 
 // function declarations
 void buffer_append(struct Connection *conn, char *to_add, int len);
-// void buffer_reserve(char *buf, size_t need);
 void create_server_struct(struct sockaddr_in *server_addr, int listen_port);
 struct Connection *Connection_create(int client_fd);
-bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key, int llm_fd);
+bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key);
 bool read_request(int fd, fd_set *all_fds);
 bool setup_get_request(int fd, char *host, char *port, char *path, fd_set *all_fds);
 bool connect_to_server(int fd, fd_set *all_fds);
 bool forward_request(int fd, fd_set *all_fds);
-bool read_response_header(int fd, fd_set *all_fds, int llm_fd);
+bool read_response_header(int fd, fd_set *all_fds);
 bool parse_response_header(char *header_buf, int *content_len, bool *is_chunked, bool *is_html, bool *is_compressed);
-bool read_response_body(int fd, fd_set *all_fds, int llm_fd);
+bool read_response_body(int fd, fd_set *all_fds);
 bool parse_request(char *req, bool *is_connect, char **host, char **port, char **path);
 void close_connection(struct Connection **conn_ptr, fd_set *all_fds);
 bool setup_connect_request(int fd, char *host, char *port, fd_set *all_fds);
@@ -145,18 +144,17 @@ bool handle_tls_handshake_client(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKE
 bool handle_tls_handshake_server(int fd, fd_set *all_fds);
 int ssl_read_with_retry(SSL *ssl, void *buf, int num, bool *should_retry);
 int ssl_write_with_retry(SSL *ssl, const void *buf, int num, bool *should_retry);
-bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd);
+bool handle_https_tunnel(int fd, fd_set *all_fds);
 char *find_header_end(char *buf, int len);
 int parse_chunk_size(char *buf, int len);
 bool decompress_and_store(struct Connection *conn);
-void send_and_reset_html(struct Connection *conn, int llm_fd);
+void send_and_reset_html(struct Connection *conn);
 int decode_chunked_data(char *input, int input_len, char **output, int *output_capacity);
 bool send_to_llm(struct Connection *conn, int llm_port);
 int decompress_chunk(struct Connection *conn, char *input, int input_len, char *output, int output_size);
 char *find_body_tag(char *buf, int len);
 bool is_ad_domain(const char *hostname);
 char *generate_chatbot_snippet(int client_fd, bool is_allrecipes);
-// int get_LLM_fd(); 
 
 int main(int argc, char *argv[]) {
     assert(argc == 4);
@@ -189,15 +187,10 @@ int main(int argc, char *argv[]) {
     listen(main_fd, SOMAXCONN);
     printf("Listening on port %d\n", listen_port);
 
-    // int llm_fd = get_LLM_fd();
-
-    int llm_fd = -1;
-
     // initialize file descriptor set with listening socket
     fd_set all_fds;
     FD_ZERO(&all_fds);
     FD_SET(main_fd, &all_fds);
-    // FD_SET(llm_fd, &all_fds);
 
     // initialize OpenSSL library
     SSL_library_init();
@@ -263,7 +256,7 @@ int main(int argc, char *argv[]) {
                 struct Connection *conn = fd_to_connection[fd];
                 if (!conn) continue;
                 
-                bool success = execute(fd, &all_fds, ca_cert, ca_key, llm_fd);
+                bool success = execute(fd, &all_fds, ca_cert, ca_key);
                 if (!success) {
                     conn = fd_to_connection[fd];
                     if (conn) {
@@ -310,7 +303,7 @@ int main(int argc, char *argv[]) {
                 struct Connection *conn = fd_to_connection[fd];
                 if (!conn) continue;
                 
-                bool success = execute(fd, &all_fds, ca_cert, ca_key, llm_fd);
+                bool success = execute(fd, &all_fds, ca_cert, ca_key);
                 if (!success) {
                     conn = fd_to_connection[fd];
                     if (conn) {
@@ -342,7 +335,7 @@ static void remove_cache_entry(struct CertCacheEntry *prev, struct CertCacheEntr
     free(entry);
 }
 
-// Helper: Find cached cert
+// helper: find cached cert
 static struct CertCacheEntry *find_cached_cert(const char *hostname) {
     struct CertCacheEntry *entry = cert_cache;
     struct CertCacheEntry *prev = NULL;
@@ -365,7 +358,7 @@ static struct CertCacheEntry *find_cached_cert(const char *hostname) {
     return NULL;
 }
 
-// Helper: Add to cache
+// helper: add to cache
 static void add_to_cache(const char *hostname, X509 *cert, EVP_PKEY *pkey) { 
     struct CertCacheEntry *entry = malloc(sizeof(struct CertCacheEntry));
     entry->hostname = strdup(hostname);
@@ -400,7 +393,7 @@ X509 *get_or_generate_cert(char *hostname, X509 *ca_cert, EVP_PKEY *ca_key, EVP_
     return cert;
 }
 
-// Helper: Free cache
+// helper: free cache
 static void free_cert_cache(void) {
     while (cert_cache) {
         struct CertCacheEntry *next = cert_cache->next;
@@ -412,7 +405,7 @@ static void free_cert_cache(void) {
     }
 }
 
-// Generate AllRecipes-specific chatbot snippet
+// generate AllRecipes-specific chatbot snippet
 char *generate_allrecipes_chatbot_snippet(int client_fd) {
     char *snippet = malloc(16384);
     if (!snippet) return NULL;
@@ -420,7 +413,7 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
     snprintf(snippet, 16384,
 "<div id=\"mitm-chat-toggle\" style=\"\n"
 " position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
-" padding: 12px 24px; background: #e85d04; color: white;\n" // Orange for AllRecipes
+" padding: 12px 24px; background: #e85d04; color: white;\n" // orange for AllRecipes
 " border-radius: 30px; cursor: pointer; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
 " font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.15);\n"
 " transition: all 0.3s ease; display: flex; align-items: center; gap: 8px;\">\n"
@@ -711,7 +704,7 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
     return snippet;
 }
 
-// Generate generic chatbot snippet with actual client FD
+// generate generic chatbot snippet with actual client FD
 char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
     if (is_allrecipes) {
         return generate_allrecipes_chatbot_snippet(client_fd);
@@ -974,8 +967,8 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
     return snippet;
 }
 
-// Update Content-Length header in stored response headers
-// Removes compressed header field
+// update Content-Length header in stored response headers
+// removes compressed header field
 char *update_content_length_header(const char *headers, int headers_len, int new_content_len) {
     char *temp = malloc(headers_len + 100);  // Extra space for safety
     memcpy(temp, headers, headers_len);
@@ -1043,7 +1036,7 @@ char *update_content_length_header(const char *headers, int headers_len, int new
         return result;
     }
     
-    // Content-Length exists, update it (existing code)
+    // content-Length exists, update it (existing code)
     char *cl_end = strstr(cl_start, "\r\n");
     if (!cl_end) {
         free(temp);
@@ -1249,7 +1242,7 @@ void buffer_append(struct Connection *conn, char *to_add, int len) {
 }
 
 // execute the appropriate handler based on connection phase
-bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key, int llm_fd) {
+bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key) {
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) return false;
 
@@ -1265,10 +1258,10 @@ bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key, int llm_f
             success = forward_request(fd, all_fds);
             break;
         case READING_RESPONSE_HEADER:
-            success = read_response_header(fd, all_fds, llm_fd);
+            success = read_response_header(fd, all_fds);
             break;
         case READING_RESPONSE_BODY:
-            success = read_response_body(fd, all_fds, llm_fd);
+            success = read_response_body(fd, all_fds);
             break;
         case TLS_HANDSHAKE_CLIENT:
             success = handle_tls_handshake_client(fd, all_fds, ca_cert, ca_key);
@@ -1277,7 +1270,7 @@ bool execute(int fd, fd_set *all_fds, X509 *ca_cert, EVP_PKEY *ca_key, int llm_f
             success = handle_tls_handshake_server(fd, all_fds);
             break;
         case HTTPS_TUNNEL:
-            success = handle_https_tunnel(fd, all_fds, llm_fd);
+            success = handle_https_tunnel(fd, all_fds);
             break;
         default:
             fprintf(stderr, "Unknown phase for fd %d\n", fd);
@@ -1849,7 +1842,7 @@ bool is_ad_domain(const char *hostname) {
 }
 
 // read HTTP response headers from server
-bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
+bool read_response_header(int fd, fd_set *all_fds) {
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) return false;
 
@@ -1939,7 +1932,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                 fprintf(stderr, "DEBUG: Skipping chatbot for background HTML: %s\n", conn->url);
                 conn->is_html = false;  // Treat as non-HTML
                 
-                // Forward headers and body immediately
+                // forward headers and body immediately
                 if (conn->is_https) {
                     bool should_retry;
                     if (ssl_write_with_retry(conn->client_ssl, conn->buf, inject_point, &should_retry) < 0) return false;
@@ -1961,7 +1954,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                     }
                 }
             } else {
-                // Real HTML - store headers for later
+                // real HTML - store headers for later
                 if (conn->response_headers) {
                     free(conn->response_headers);
                 }
@@ -1971,7 +1964,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                 conn->response_headers[headers_len] = '\0';
                 fprintf(stderr, "DEBUG: Stored headers for HTML response (len=%d), is_chunked=%d\n", headers_len, is_chunked);
                 
-                // For HTML, buffer the initial body data, don't forward yet
+                // for HTML, buffer the initial body data, don't forward yet
                 if (remaining_body > 0) {
                     buffer_append(conn, conn->buf + body_offset, remaining_body);
                     fprintf(stderr, "DEBUG: Buffered initial body chunk (%d bytes)\n", remaining_body);
@@ -1982,9 +1975,9 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
         conn->header_injected = true;
         conn->body_bytes_read = remaining_body;
 
-        // If HTML, store headers so we can update Content-Length later
+        // if HTML, store headers so we can update Content-Length later
         if (conn->is_html) {
-            // Free old headers if they exist
+            // free old headers if they exist
             if (conn->response_headers) {
                 free(conn->response_headers);
             }
@@ -1994,13 +1987,13 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
             conn->response_headers[headers_len] = '\0';
             fprintf(stderr, "DEBUG: Stored headers for HTML response (len=%d), is_chunked=%d\n", headers_len, is_chunked);
             
-            // For HTML, buffer the initial body data, don't forward yet
+            // for HTML, buffer the initial body data, don't forward yet
             if (remaining_body > 0) {
                 buffer_append(conn, conn->buf + body_offset, remaining_body);
                 fprintf(stderr, "DEBUG: Buffered initial body chunk (%d bytes)\n", remaining_body);
             }
         } else {
-            // For non-HTML, forward body immediately
+            // for non-HTML, forward body immediately
             if (remaining_body > 0) {
                 write(conn->client_fd, conn->buf + body_offset, remaining_body);
             }
@@ -2018,26 +2011,18 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
         conn->offset = 0;
         conn->phase = HTTPS_TUNNEL;
     } else {
-        // if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
-        //     // if finish body, print LLM buffer
-        //     send_and_reset_html(conn, llm_fd);
-
-        //     return false;
-        // }
         conn->phase = READING_RESPONSE_BODY;
     }
 
-    // At the very end of read_response_header, after setting conn->phase
-
-    // Check if body is already complete
+    // check if body is already complete
     if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
         fprintf(stderr, "DEBUG: Body already complete in header phase!\n");
         
         if (conn->is_html && conn->html_offset > 0) {
-            // Do injection immediately
+            // do injection immediately
             fprintf(stderr, "DEBUG: Doing immediate injection from header phase\n");
             
-            // Decompress if needed
+            // decompress if needed
             if (conn->is_compressed) {
                 if (!decompress_and_store(conn)) {
                     fprintf(stderr, "ERROR: Failed to decompress HTML\n");
@@ -2046,7 +2031,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                 }
             }
             
-            // Inject chatbot
+            // inject chatbot
             int injected_len = 0;
             char *injected_html = inject_chatbot_into_html(conn->LLM_buf, conn->html_offset, &injected_len, conn->client_fd);
             
@@ -2073,7 +2058,7 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                     fprintf(stderr, "ERROR: Failed to write body: %s\n", strerror(errno));
                 }
                 
-                // Verify total bytes sent
+                // verify total bytes sent
                 fprintf(stderr, "DEBUG: Total sent should be: %d + %zu + %d = %d bytes\n",
                         headers_without_end, strlen(injection), injected_len,
                         headers_without_end + (int)strlen(injection) + injected_len);
@@ -2085,10 +2070,10 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
                 
                 send_to_llm(conn, 9450);
                 
-                // Reset
+                // reset
                 conn->html_offset = 0;
                 conn->is_html = false;
-                return false;  // Close connection
+                return false;  // close connection
             }
         }
     }
@@ -2096,15 +2081,15 @@ bool read_response_header(int fd, fd_set *all_fds, int llm_fd) {
     return true;
 }
 
-// Helper: Initialize streaming decompressor
+// helper: initialize streaming decompressor
 bool init_streaming_decompressor(struct Connection *conn, unsigned char *first_bytes, int len) {
     if (conn->decompression_initialized) return true;
     
-    // Check compression type from magic bytes
+    // check compression type from magic bytes
     bool is_gzip = (len >= 2 && first_bytes[0] == 0x1f && first_bytes[1] == 0x8b);
     
     if (is_gzip) {
-        // Initialize gzip streaming
+        // initialize gzip streaming
         conn->gzip_stream = malloc(sizeof(z_stream));
         memset(conn->gzip_stream, 0, sizeof(z_stream));
         
@@ -2117,7 +2102,7 @@ bool init_streaming_decompressor(struct Connection *conn, unsigned char *first_b
         
         fprintf(stderr, "DEBUG: Initialized gzip streaming decompressor\n");
     } else {
-        // Initialize brotli streaming
+        // initialize brotli streaming
         conn->brotli_state = BrotliDecoderCreateInstance(NULL, NULL, NULL);
         if (!conn->brotli_state) {
             fprintf(stderr, "ERROR: BrotliDecoderCreateInstance failed\n");
@@ -2130,10 +2115,10 @@ bool init_streaming_decompressor(struct Connection *conn, unsigned char *first_b
     return true;
 }
 
-// Helper: Decompress a chunk of data
+// helper: decompress a chunk of data
 int decompress_chunk(struct Connection *conn, char *input, int input_len, char *output, int output_size) {
     if (conn->gzip_stream) {
-        // Gzip streaming decompression
+        // gzip streaming decompression
         conn->gzip_stream->next_in = (unsigned char *)input;
         conn->gzip_stream->avail_in = input_len;
         conn->gzip_stream->next_out = (unsigned char *)output;
@@ -2149,7 +2134,7 @@ int decompress_chunk(struct Connection *conn, char *input, int input_len, char *
         return decompressed;
         
     } else if (conn->brotli_state) {
-        // Brotli streaming decompression
+        // brotli streaming decompression
         size_t available_in = input_len;
         const uint8_t *next_in = (const uint8_t *)input;
         size_t available_out = output_size;
@@ -2176,8 +2161,8 @@ int decompress_chunk(struct Connection *conn, char *input, int input_len, char *
     return -1;
 }
 
-// Find <body> tag in buffer, return pointer to it or NULL
-// Returns pointer to the '>' character after <body
+// find <body> tag in buffer, return pointer to it or NULL
+// returns pointer to the '>' character after <body
 char *find_body_tag(char *buf, int len) {
     for (int i = 0; i < len - 5; i++) {
         if (buf[i] == '<' &&
@@ -2187,10 +2172,10 @@ char *find_body_tag(char *buf, int len) {
             (buf[i+4] == 'y' || buf[i+4] == 'Y') &&
             (buf[i+5] == '>' || buf[i+5] == ' ' || buf[i+5] == '\t' || 
              buf[i+5] == '\n' || buf[i+5] == '\r')) {
-            // Found <body, now find the closing >
+            // found <body, now find the closing >
             for (int j = i + 5; j < len; j++) {
                 if (buf[j] == '>') {
-                    return buf + j + 1;  // Return position right after >
+                    return buf + j + 1;  // return position right after >
                 }
             }
         }
@@ -2198,10 +2183,10 @@ char *find_body_tag(char *buf, int len) {
     return NULL;
 }
 
-// Find the closing </head> tag and return a pointer to the '<' character.
-// If </head> is not found, return NULL.
+// find the closing </head> tag and return a pointer to the '<' character.
+// if </head> is not found, return NULL.
 char *find_head_close_tag(char *buf, int len) {
-    // Search for "</head>" (case-insensitive)
+    // search for "</head>" (case-insensitive)
     for (int i = 0; i < len - 7; i++) {
         if (buf[i] == '<' && buf[i+1] == '/' &&
             (buf[i+2] == 'h' || buf[i+2] == 'H') &&
@@ -2210,14 +2195,14 @@ char *find_head_close_tag(char *buf, int len) {
             (buf[i+5] == 'd' || buf[i+5] == 'D') &&
             buf[i+6] == '>') 
         {
-            // Found </head>
-            return buf + i; // Return pointer to the '<' character of "</head>"
+            // found </head>
+            return buf + i; // return pointer to the '<' character of "</head>"
         }
     }
     return NULL;
 }
 
-bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
+bool read_response_body(int fd, fd_set *all_fds) {
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) return false;
 
@@ -2246,9 +2231,9 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
     }
 
     if (n == 0) {
-        // Connection closed - handle buffered data
+        // connection closed - handle buffered data
         if (conn->is_html && conn->html_offset > 0) {
-            // Decompress if needed
+            // decompress if needed
             if (conn->is_compressed) {
                 fprintf(stderr, "DEBUG: Decompressing at connection close (%d bytes)\n", conn->html_offset);
                 if (!decompress_and_store(conn)) {
@@ -2258,7 +2243,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 }
             }
             
-            // Inject chatbot if we haven't sent headers yet
+            // inject chatbot if we haven't sent headers yet
             if (conn->response_headers && !conn->header_sent_to_client) {
                 char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
                 
@@ -2279,7 +2264,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     injected_len = conn->html_offset;
                 }
                 
-                // === FIX: USE UPDATE FUNCTION TO ADD CONTENT-LENGTH ===
+                // add content length
                 char *updated_headers = update_content_length_header(conn->response_headers,
                                                                      conn->response_headers_len,
                                                                      injected_len);
@@ -2298,7 +2283,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     write(conn->client_fd, final_html, injected_len);
                 }
                 
-                free(updated_headers);  // Don't forget to free!
+                free(updated_headers);
                 
                 if (final_html != conn->LLM_buf) {
                     free(conn->LLM_buf);
@@ -2306,7 +2291,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     conn->html_offset = injected_len;
                 }
             } else if (conn->header_sent_to_client) {
-                // Headers already sent, just send body
+                // headers already sent, just send body
                 if (conn->is_https) {
                     ssl_write_with_retry(conn->client_ssl, conn->LLM_buf, 
                                         conn->html_offset, &should_retry);
@@ -2315,11 +2300,11 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 }
             }
             
-            // Send to LLM
+            // send to LLM
             send_to_llm(conn, 9450);
         }
         
-        // Cleanup decompressor
+        // cleanup decompressor
         if (conn->gzip_stream) {
             inflateEnd(conn->gzip_stream);
             free(conn->gzip_stream);
@@ -2335,9 +2320,9 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
        
     conn->body_bytes_read += n;
 
-    // === NEW APPROACH: Just accumulate everything ===
+    // accumulate all HTML
     if (conn->is_html) {
-        // Just buffer the data (compressed or not)
+        // buffer the data (compressed or not)
         buffer_append(conn, conn->buf, n);
         fprintf(stderr, "DEBUG: Accumulated %d bytes (total: %d, body_read: %d, content_length: %d)\n",
                 n, conn->html_offset, conn->body_bytes_read, conn->content_length);
@@ -2350,12 +2335,12 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
         }
     }
 
-    // Check if response is complete
+    // check if response is complete
     if (conn->content_length > 0 && conn->body_bytes_read >= conn->content_length) {
         fprintf(stderr, "DEBUG: Response complete - processing accumulated data\n");
         
         if (conn->is_html && conn->html_offset > 0) {
-            // === STEP 1: DECOMPRESS IF NEEDED ===
+            // decompress if needed
             if (conn->is_compressed) {
                 fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                 
@@ -2368,7 +2353,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 conn->is_compressed = false;
             }
             
-            // === STEP 2: SEARCH FOR <BODY> AND INJECT ===
+            // search for body tag and inject
             char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
             
             int injected_len = 0;
@@ -2391,9 +2376,8 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                 injected_len = conn->html_offset;
             }
             
-            // === STEP 3: SEND HEADERS WITH UPDATED CONTENT-LENGTH ===
+            // send headers with updated content-length
             if (conn->response_headers) {
-                // === FIX: PROPERLY UPDATE CONTENT-LENGTH ===
                 char *updated_headers = update_content_length_header(conn->response_headers,
                                                                      conn->response_headers_len,
                                                                      injected_len);
@@ -2412,10 +2396,10 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
                     write(conn->client_fd, injection, strlen(injection));
                 }
                 
-                free(updated_headers);  // Don't forget to free!
+                free(updated_headers);
             }
             
-            // === STEP 4: SEND ENTIRE HTML TO CLIENT ===
+            // send entire HTML to client
             if (conn->is_https) {
                 ssl_write_with_retry(conn->client_ssl, final_html, 
                                     injected_len, &should_retry);
@@ -2425,7 +2409,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
             
             fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
             
-            // === STEP 5: SEND TO LLM ===
+            // send to LLM
             if (final_html != conn->LLM_buf) {
                 free(conn->LLM_buf);
                 conn->LLM_buf = final_html;
@@ -2435,7 +2419,7 @@ bool read_response_body(int fd, fd_set *all_fds, int llm_fd) {
             
             send_to_llm(conn, 9450);
             
-            // === CLEANUP ===
+            // cleanup
             if (conn->gzip_stream) {
                 inflateEnd(conn->gzip_stream);
                 free(conn->gzip_stream);
@@ -2507,7 +2491,7 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
     int decoded_offset = 0;
     int input_offset = 0;
     
-    // Allocate output buffer if needed
+    // allocate output buffer if needed
     if (*output == NULL || *output_capacity == 0) {
         *output_capacity = input_len; // Start with same size
         *output = malloc(*output_capacity);
@@ -2515,47 +2499,47 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
     }
     
     while (input_offset < input_len) {
-        // Parse chunk size (hex number followed by \r\n)
+        // parse chunk size (hex number, then \r\n)
         int chunk_size = -1;
         int size_line_end = -1;
         
         for (int i = input_offset; i < input_len - 1; i++) {
             if (input[i] == '\r' && input[i+1] == '\n') {
-                // Found end of size line
+                // found end of size line
                 char size_str[32];
                 int size_len = i - input_offset;
-                if (size_len >= 32) return -1; // Size line too long
+                if (size_len >= 32) return -1; // size line too long
                 
                 memcpy(size_str, input + input_offset, size_len);
                 size_str[size_len] = '\0';
                 
-                // Handle chunk extensions (ignore anything after ;)
+                // handle chunk extensions (ignore anything after ;)
                 char *semicolon = strchr(size_str, ';');
                 if (semicolon) *semicolon = '\0';
                 
                 chunk_size = (int)strtol(size_str, NULL, 16);
-                size_line_end = i + 2; // After \r\n
+                size_line_end = i + 2; // after \r\n
                 break;
             }
         }
         
         if (chunk_size < 0 || size_line_end < 0) {
-            // Incomplete chunk in buffer
+            // incomplete chunk in buffer
             break;
         }
         
         if (chunk_size == 0) {
-            // Last chunk - we're done
+            // last chunk - done
             break;
         }
         
-        // Check if we have the full chunk data + trailing \r\n
+        // check if we have the full chunk data + trailing \r\n
         if (size_line_end + chunk_size + 2 > input_len) {
-            // Don't have full chunk yet
+            // don't have full chunk yet
             break;
         }
         
-        // Expand output buffer if needed
+        // expand output buffer if needed
         if (decoded_offset + chunk_size > *output_capacity) {
             *output_capacity *= 2;
             char *tmp = realloc(*output, *output_capacity);
@@ -2563,11 +2547,11 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
             *output = tmp;
         }
         
-        // Copy chunk data to output
+        // copy chunk data to output
         memcpy(*output + decoded_offset, input + size_line_end, chunk_size);
         decoded_offset += chunk_size;
         
-        // Move past this chunk (size line + data + \r\n)
+        // move past this chunk (size line + data + \r\n)
         input_offset = size_line_end + chunk_size + 2;
     }
     
@@ -2578,7 +2562,7 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
 bool decompress_and_store(struct Connection *conn) {
     if (conn->html_offset == 0) return true;
     
-    // Check first bytes to determine compression type
+    // check first bytes to determine compression type
     unsigned char *data = (unsigned char *)conn->LLM_buf;
     bool is_gzip = (conn->html_offset >= 2 && data[0] == 0x1f && data[1] == 0x8b);
         
@@ -2594,7 +2578,7 @@ bool decompress_and_store(struct Connection *conn) {
         stream.next_out = (unsigned char *)decompressed;
         stream.avail_out = decompressed_size;
         
-        // Initialize with gzip flag (16 + MAX_WBITS)
+        // initialize with gzip flag
         if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) {
             free(decompressed);
             fprintf(stderr, "ERROR: inflateInit2 failed\n");
@@ -2614,7 +2598,7 @@ bool decompress_and_store(struct Connection *conn) {
         
         fprintf(stderr, "DEBUG: Gzip decompressed to %zu bytes\n", actual_size);
         
-        // Replace compressed data with decompressed data
+        // replace compressed data with decompressed data
         free(conn->LLM_buf);
         conn->LLM_buf = decompressed;
         conn->html_offset = actual_size;
@@ -2644,7 +2628,7 @@ bool decompress_and_store(struct Connection *conn) {
         
         fprintf(stderr, "DEBUG: Brotli decompressed to %zu bytes\n", actual_size);
         
-        // Replace compressed data with decompressed data
+        // replace compressed data with decompressed data
         free(conn->LLM_buf);
         conn->LLM_buf = decompressed;
         conn->html_offset = actual_size;
@@ -2707,7 +2691,7 @@ bool parse_request(char *req, bool *is_connect, char **host, char **port, char *
         *path = NULL;
     } else if (strcmp(method, "GET") == 0) {
         *is_connect = false;
-        // handle absolute URI format (http://host:port/path)
+        // handle absolute URL format (http://host:port/path)
         if (strncmp(target, "http://", 7) == 0) {
             char *host_start = target + 7;
             char *path_start = strchr(host_start, '/');
@@ -2866,7 +2850,7 @@ int parse_chunk_size(char *buf, int len) {
 }
 
 // handle bidirectional HTTPS tunnel with HTTP response parsing
-bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
+bool handle_https_tunnel(int fd, fd_set *all_fds) {
     struct Connection *conn = fd_to_connection[fd];
     if (!conn) {
         FD_CLR(fd, all_fds);
@@ -2885,9 +2869,9 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
         
         if (!conn->server_ssl) return true;
         
-        // === NEW: Detect new HTTP requests within the tunnel ===
+        // detect new HTTP requests within the tunnel
         if (n > 4 && (strncmp(temp_buf, "GET ", 4) == 0 || strncmp(temp_buf, "POST", 4) == 0)) {
-            // Parse the new request to extract the path
+            // parse the new request to extract the path
             char method[16], path[512], version[16];
             if (sscanf(temp_buf, "%15s %511s %15s", method, path, version) == 3) {
                 // Update URL
@@ -2897,7 +2881,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                 
                 fprintf(stderr, "DEBUG: New request in tunnel: %s\n", conn->url);
                 
-                // Reset state for new response
+                // reset state for new response
                 conn->tunnel_state = TUNNEL_EXPECT_RESPONSE_HEADERS;
                 conn->html_offset = 0;
                 conn->is_html = false;
@@ -2938,8 +2922,6 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
         
         conn->tunnel_buf_offset += n;
 
-        // bool is_html = false;
-        
         // process based on current tunnel state
         switch (conn->tunnel_state) {  
             case TUNNEL_EXPECT_RESPONSE_HEADERS: {
@@ -2951,7 +2933,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     // found complete headers
                     int headers_len = end_of_headers - conn->tunnel_buf + 4;
                     
-                    // === PARSE HEADERS FIRST ===
+                    // PARSE headers first
                     char temp_copy[BUFFER_SIZE];
                     int copy_len = (headers_len < BUFFER_SIZE - 1) ? headers_len : BUFFER_SIZE - 1;
                     memcpy(temp_copy, conn->tunnel_buf, copy_len);
@@ -2966,38 +2948,24 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     fprintf(stderr, "DEBUG: Parsed HTTPS headers - is_html=%d, content_length=%d, is_chunked=%d, is_compressed=%d\n",
                             is_html, content_length, is_chunked, is_compressed);
                     
-                    // === STORE HEADERS FOR HTML RESPONSES (with Content-Encoding removed) ===
+                    // store headers for HTML response (remove Content-Encoding)
                     if (is_html) {
-                        
                         if (conn->response_headers) {
                             free(conn->response_headers);
                         }
                         
-                        // Start with a copy of the headers for modification
+                        // start with a copy of the headers for modification
                         char *modified_headers = strdup(temp_copy);
 
-                        // 1. Remove Content-Encoding (since you decompress before sending to client)
+                        // remove Content-Encoding (since we decompress before sending to client)
                         char *ce_start = strstr(modified_headers, "Content-Encoding:");
                         if (ce_start) {
                             char *ce_end = strstr(ce_start, "\r\n");
                             if (ce_end) {
-                                // Remove the Content-Encoding line
+                                // remove the Content-Encoding line
                                 memmove(ce_start, ce_end + 2, strlen(ce_end + 2) + 1);
                             }
                         }
-
-                        // 2. Remove Content-Length (since the length will change after decompression/modification)
-                        // char *cl_start = strstr(modified_headers, "Content-Length:");
-                        // if (cl_start) {
-                        //     char *cl_end = strstr(cl_start, "\r\n");
-                        //     if (cl_end) {
-                        //         // Remove the Content-Length line
-                        //         memmove(cl_start, cl_end + 2, strlen(cl_end + 2) + 1);
-                        //     }
-                        // }
-                        
-                        // Note: If 'Transfer-Encoding: chunked' was present, it remains. 
-                        // This is what forces your proxy to re-chunk the body later.
 
                         conn->response_headers = modified_headers;
                         conn->response_headers_len = strlen(modified_headers);
@@ -3007,7 +2975,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                                 conn->response_headers_len);
                                 
                     } else {
-                        // For non-HTML, just clear the stored headers since we passthrough immediately
+                        // for non-HTML, just clear the stored headers since we passthrough immediately
                         if (conn->response_headers) {
                             free(conn->response_headers);
                             conn->response_headers = NULL;
@@ -3015,17 +2983,17 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         }
                     }
                                         
-                    // === UPDATE CONN STATE ===
+                    // update connection state
                     conn->is_html = is_html;
-                    conn->is_compressed = is_compressed; // Still useful for decompression logic later
-                    conn->content_length = content_length; // Original CL, may not be used if we chunk
+                    conn->is_compressed = is_compressed;
+                    conn->content_length = content_length;
                     conn->body_bytes_read = 0;
                     
-                    // === NOW DECIDE WHAT TO DO WITH BODY ===
+                    // decide what to do with body
                     if (!conn->is_html) {
-                        // For non-HTML, inject X-Proxy header and forward (no decompression/decoding needed)
+                        // for non-HTML, inject X-Proxy header and forward (no decompression/decoding)
                         const char *injection = "X-Proxy:CS112\r\n";
-                        int inject_point = headers_len - 2;  // Before final \r\n\r\n
+                        int inject_point = headers_len - 2;  // before final \r\n\r\n
                         
                         int written = ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf, 
                                                             inject_point, &should_retry);
@@ -3038,7 +3006,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         written = ssl_write_with_retry(conn->client_ssl, "\r\n", 2, &should_retry);
                         if (written < 0) return false;
                         
-                        // Forward any body data we already have
+                        // forward any body data we already have
                         int body_in_buffer = conn->tunnel_buf_offset - headers_len;
                         if (body_in_buffer > 0) {
                             written = ssl_write_with_retry(conn->client_ssl,
@@ -3049,7 +3017,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         
                         conn->tunnel_buf_offset = 0;
                     } else {
-                        // For HTML, move the body data to the start of tunnel_buf for chunk processing
+                        // for HTML, move the body data to the start of tunnel_buf for chunk processing
                         int body_in_buffer = conn->tunnel_buf_offset - headers_len;
                         if (body_in_buffer > 0) {
                             memmove(conn->tunnel_buf, conn->tunnel_buf + headers_len, body_in_buffer);
@@ -3060,7 +3028,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         }
                     }
 
-                    // === NOW DETERMINE STATE BASED ON RESPONSE TYPE ===
+                    // determine state based on response type
                     if (is_chunked) {
                         if (is_html) {
                             conn->tunnel_state = TUNNEL_READING_CHUNKED_RESPONSE;
@@ -3074,20 +3042,20 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         }
                     }
                     else if (content_length > 0) {
-                        // === NEW: Handle known content-length responses ===
+                        // handle known content-length responses
                         if (is_html) {
                             conn->tunnel_state = TUNNEL_READING_RESPONSE_BODY_KNOWN_LENGTH;
                             conn->tunnel_body_remaining = content_length;
                             fprintf(stderr, "DEBUG: Entering KNOWN_LENGTH mode for HTML (content_length=%d, compressed=%d)\n",
                                     content_length, is_compressed);
                         } else {
-                            // Non-HTML with known length - just passthrough
+                            // non-HTML with known length - just passthrough
                             conn->tunnel_state = TUNNEL_PASSTHROUGH;
                             conn->tunnel_buf_offset = 0;
                             fprintf(stderr, "DEBUG: Entering PASSTHROUGH for non-HTML with known length\n");
                         }
                     } else {
-                        // No content-length, no chunked - passthrough until connection closes
+                        // no content-length, no chunked - passthrough until connection closes
                         conn->tunnel_state = TUNNEL_PASSTHROUGH;
                         conn->tunnel_buf_offset = 0;
                         fprintf(stderr, "DEBUG: Entering PASSTHROUGH (no length info)\n");
@@ -3104,17 +3072,17 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                 }
                 
                 if (conn->is_html) {
-                    // === JUST ACCUMULATE - DON'T DECOMPRESS OR INJECT YET ===
+                    // just accumulate - don't decompress or inject yet
                     buffer_append(conn, conn->tunnel_buf, to_forward);
                     fprintf(stderr, "DEBUG: Accumulated %d bytes (total: %d, remaining: %d)\n",
                             to_forward, conn->html_offset, conn->tunnel_body_remaining - to_forward);
                 } else {
-                    // Non-HTML: forward immediately
+                    // non-HTML: forward immediately
                     bool should_retry;
                     ssl_write_with_retry(conn->client_ssl, conn->tunnel_buf, to_forward, &should_retry);
                 }
                 
-                // Consume the data
+                // consume the data
                 conn->tunnel_body_remaining -= to_forward;
                 
                 if (to_forward < conn->tunnel_buf_offset) {
@@ -3125,7 +3093,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     conn->tunnel_buf_offset = 0;
                 }
                 
-                // === PROCESS AT THE END WHEN COMPLETE ===
+                // process at the end when complete
                 if (conn->tunnel_body_remaining <= 0) {
                     fprintf(stderr, "DEBUG: Known-length response complete\n");
                     
@@ -3133,7 +3101,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         fprintf(stderr, "DEBUG: Starting final processing - accumulated %d bytes (compressed=%d)\n",
                                 conn->html_offset, conn->is_compressed);
                         
-                        // Decompress if needed
+                        // decompress if needed
                         if (conn->is_compressed) {
                             fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                             
@@ -3146,7 +3114,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             conn->is_compressed = false;
                         }
                         
-                        // Search for <body> and inject chatbot
+                        // search for <body> and inject chatbot
                         char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
                         
                         int injected_len = 0;
@@ -3169,7 +3137,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             injected_len = conn->html_offset;
                         }
                         
-                        // Send headers with updated Content-Length
+                        // send headers with updated Content-Length
                         if (conn->response_headers) {
                             char *updated_headers = update_content_length_header(conn->response_headers,
                                                                                 conn->response_headers_len,
@@ -3186,14 +3154,14 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             free(updated_headers);
                         }
                         
-                        // Send entire HTML to client
+                        // send entire HTML to client
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, final_html, 
                                             injected_len, &should_retry);
                         
                         fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
                         
-                        // Send to LLM
+                        // send to LLM
                         if (final_html != conn->LLM_buf) {
                             free(conn->LLM_buf);
                             conn->LLM_buf = final_html;
@@ -3204,7 +3172,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         send_to_llm(conn, 9450);
                     }
                     
-                    // === CLEANUP ===
+                    // cleanup
                     conn->html_offset = 0;
                     conn->is_html = false;
                     conn->is_compressed = false;
@@ -3224,7 +3192,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                 bool found_last_chunk = false;
                 
                 while (buf_offset < conn->tunnel_buf_offset) {
-                    // Parse chunk size
+                    // parse chunk size
                     int chunk_size = parse_chunk_size(conn->tunnel_buf + buf_offset, 
                                                     conn->tunnel_buf_offset - buf_offset);
                     
@@ -3233,17 +3201,17 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     
                     if (chunk_size == -1) {
                         fprintf(stderr, "DEBUG: Incomplete chunk size line, breaking\n");
-                        break;  // Need more data
+                        break;  // need more data
                     }
                     
                     if (chunk_size == 0) {
                         fprintf(stderr, "DEBUG: Last chunk (0) found\n");
                         found_last_chunk = true;
-                        buf_offset += 5;  // Consume "0\r\n\r\n"
+                        buf_offset += 5;  // consume "0\r\n\r\n"
                         break;
                     }
                     
-                    // Find end of size line
+                    // find end of size line
                     char *size_line_end = strstr(conn->tunnel_buf + buf_offset, "\r\n");
                     if (!size_line_end) {
                         fprintf(stderr, "DEBUG: No CRLF after chunk size, breaking\n");
@@ -3252,41 +3220,41 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     size_line_end += 2;
                     int size_line_len = size_line_end - (conn->tunnel_buf + buf_offset);
                     
-                    // Check if we have complete chunk data + trailing CRLF
+                    // check if we have complete chunk data + trailing CRLF
                     int bytes_needed = size_line_len + chunk_size + 2;
                     int bytes_available = conn->tunnel_buf_offset - buf_offset;
                     
                     if (bytes_available < bytes_needed) {
                         fprintf(stderr, "DEBUG: Incomplete chunk: need %d bytes, have %d. Breaking.\n", 
                                 bytes_needed, bytes_available);
-                        break;  // Need more data
+                        break;  // need more data
                     }
                     
                     fprintf(stderr, "DEBUG: Have complete chunk of %d bytes\n", chunk_size);
                     
-                    // Extract chunk data (skip size line)
+                    // extract chunk data (skip size line)
                     char *chunk_data = conn->tunnel_buf + buf_offset + size_line_len;
                     
                     if (conn->is_html) {
-                        // === NEW: Just accumulate compressed data, don't decompress yet ===
+                        // just accumulate compressed data, don't decompress yet
                         buffer_append(conn, chunk_data, chunk_size);
                         fprintf(stderr, "DEBUG: Accumulated %d bytes (total now: %d)\n", 
                                 chunk_size, conn->html_offset);
                         
                     } else {
-                        // === NON-HTML: FORWARD ORIGINAL CHUNKED DATA AS-IS ===
+                        // NON-HTML: forward original data as-is
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, 
-                                            conn->tunnel_buf + buf_offset,  // Includes size line
-                                            bytes_needed,                    // Entire chunk with framing
+                                            conn->tunnel_buf + buf_offset,  // includes size line
+                                            bytes_needed,                    // entire chunk with framing
                                             &should_retry);
                     }
                     
-                    // Consume this chunk
+                    // update offset
                     buf_offset += bytes_needed;
                 }
                 
-                // Remove processed data from buffer
+                // remove processed data from buffer
                 if (buf_offset > 0) {
                     memmove(conn->tunnel_buf, conn->tunnel_buf + buf_offset,
                             conn->tunnel_buf_offset - buf_offset);
@@ -3294,7 +3262,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                     fprintf(stderr, "DEBUG: Consumed %d bytes, %d remaining\n", buf_offset, conn->tunnel_buf_offset);
                 }
                 
-                // === NEW: Handle completion - decompress and inject at the END ===
+                // handle completion - decompress and inject at the END
                 if (found_last_chunk) {
                     fprintf(stderr, "DEBUG: Chunked response complete\n");
                     
@@ -3302,7 +3270,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         fprintf(stderr, "DEBUG: Starting final processing - accumulated %d bytes (compressed=%d)\n",
                                 conn->html_offset, conn->is_compressed);
                         
-                        // Decompress if needed
+                        // decompress if needed
                         if (conn->is_compressed) {
                             fprintf(stderr, "DEBUG: Decompressing %d bytes...\n", conn->html_offset);
                             
@@ -3315,7 +3283,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             conn->is_compressed = false;
                         }
                         
-                        // Search for <body> and inject chatbot
+                        // search for <body> and inject chatbot
                         char *body_pos = find_body_tag(conn->LLM_buf, conn->html_offset);
                         
                         int injected_len = 0;
@@ -3324,7 +3292,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         if (body_pos) {
                             fprintf(stderr, "DEBUG: Found <body> tag, injecting chatbot\n");
                             
-                            // Inject chatbot
+                            // inject chatbot
                             final_html = inject_chatbot_into_html(conn->LLM_buf, conn->html_offset, 
                                                                 &injected_len, conn->client_fd);
                             
@@ -3339,7 +3307,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                             injected_len = conn->html_offset;
                         }
                         
-                        // Send headers
+                        // send headers
                         if (conn->response_headers) {
                             bool should_retry;
                             const char *injection = "\r\nX-Proxy:CS112\r\n\r\n";
@@ -3351,15 +3319,15 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                                         strlen(injection), &should_retry);
                         }
                         
-                        // Send entire HTML to client
+                        // send entire HTML to client
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, final_html, 
                                             injected_len, &should_retry);
                         
                         fprintf(stderr, "DEBUG: Sent %d bytes to client\n", injected_len);
                         
-                        // Send to LLM
-                        // Update LLM_buf if we created a new buffer for injection
+                        // send to LLM
+                        // update LLM_buf if we created a new buffer for injection
                         if (final_html != conn->LLM_buf) {
                             free(conn->LLM_buf);
                             conn->LLM_buf = final_html;
@@ -3369,16 +3337,16 @@ bool handle_https_tunnel(int fd, fd_set *all_fds, int llm_fd) {
                         
                         send_to_llm(conn, 9450);
                         
-                        // Send terminating chunk
+                        // send terminating chunk
                         ssl_write_with_retry(conn->client_ssl, "0\r\n\r\n", 5, &should_retry);
                         fprintf(stderr, "DEBUG: Sent terminating chunk\n");
                     } else {
-                        // Non-HTML chunked - send terminating chunk
+                        // non-HTML chunked - send terminating chunk
                         bool should_retry;
                         ssl_write_with_retry(conn->client_ssl, "0\r\n\r\n", 5, &should_retry);
                     }
                     
-                    // === CLEANUP ===
+                    // cleanup
                     conn->html_offset = 0;
                     conn->is_html = false;
                     conn->is_compressed = false;
@@ -3428,12 +3396,12 @@ void send_as_chunk(SSL *ssl, char *data, int len) {
 }
 
 // send HTML buffer to Flask for analysis, then reset state
-void send_and_reset_html(struct Connection *conn, int llm_fd) {
+void send_and_reset_html(struct Connection *conn) {
     if (!conn->is_html || conn->html_offset == 0) {
         return;
     }
 
-    // Decompress if needed (for chunked responses that were stored compressed)
+    // decompress if needed (for chunked responses that were stored compressed)
     if (conn->is_compressed) {
         if (!decompress_and_store(conn)) {
             fprintf(stderr, "ERROR: Failed to decompress HTML in send_and_reset\n");
