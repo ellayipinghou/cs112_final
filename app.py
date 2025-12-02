@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 app = Flask(__name__)
 
-# Add CORS headers to all responses
+# add CORS headers to all responses
 @app.after_request
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -13,10 +13,10 @@ def add_cors_headers(response):
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     return response
 
-# Dictionary mapping client_fd to their current page URL
+# dictionary mapping client_fd to their current page URL
 current_page_urls = {} 
 
-# Run llm data transfer route to port 9450
+# run llm data transfer route to port 9450
 @app.route('/upload_html', methods=['POST'])
 def process():
     html = request.data.decode('utf-8', errors='ignore')
@@ -25,27 +25,27 @@ def process():
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Extract page title and description
+    # extract page title and description
     title = soup.find('title')
     title_text = title.get_text(strip=True) if title else "Unknown"
     
     meta_desc = soup.find('meta', attrs={'name': 'description'})
     description_text = meta_desc.get('content', '') if meta_desc else ""
 
-    # Remove scripts, styles, navigation, etc.
+    # remove scripts, styles, navigation, etc.
     for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
         tag.decompose()
 
-    # Focus on main content
+    # focus on main content
     main_content = soup.find('main') or soup.find('article') or soup.find(id='content') or soup.body
     
     text = (main_content or soup).get_text(separator='\n', strip=True)
     
-    # Remove excessive whitespace
+    # remove excessive whitespace
     lines = [line.strip() for line in text.split('\n') if line.strip()]
     cleaned_text = '\n'.join(lines)
     
-    # Prepend metadata for better context
+    # prepend metadata for better context
     context_with_metadata = f"Page Title: {title_text}\n"
     if description_text:
         context_with_metadata += f"Page Description: {description_text}\n"
@@ -58,7 +58,7 @@ def process():
     
     print(f"DEBUG: Received Page-URL header: '{page_url}'")
 
-    # Handle missing/invalid URL
+    # handle missing/invalid URL
     if not page_url or page_url == 'unknown' or page_url == '(null)':
         print("WARNING: Invalid Page-URL, using fallback")
         clean_url = f"unknown_page_{client_fd}"
@@ -84,9 +84,9 @@ def process():
 
     print(f"DEBUG UPLOAD: page_session_id={page_session_id}, client_fd={client_fd}, html_length={len(html)}")
 
-    # Upload with metadata included
+    # upload with metadata included
     response = text_upload(
-        text=context_with_metadata,  # Use version with metadata
+        text=context_with_metadata,
         strategy='smart', 
         session_id=page_session_id, 
         description=f'Content from webpage: {clean_url} (Title: {title_text})'
@@ -112,7 +112,7 @@ def query():
     if page_url == "unknown":
         return jsonify({"text": "No page loaded yet. Please navigate to a webpage first."})
     
-    # Use URL-based session ID
+    # use URL-based session ID
     page_session_id = f"page_{page_url}"
     
     print(f"DEBUG: Using page_session_id={page_session_id} for client_fd={client_fd}")
@@ -124,7 +124,7 @@ def query():
         query=user_query,
         session_id=page_session_id,
         rag_threshold=0.1,  # lower threshold = more inclusive
-        rag_k=5  # get top 5 relevant chunks
+        rag_k=5  # get top 5 recent chunks
     )
 
     if not context_chunks:
@@ -144,7 +144,7 @@ def query():
     if not context_text.strip():
         return jsonify({"text": "No context found. Document may still be processing."})
     
-    # Use CONVERSATION session for generate (maintains chat history)
+    # use CONVERSATION session for generate (maintains chat history)
     conv_session_id = f"chat_{client_fd}"
     
     response = generate(
@@ -152,8 +152,8 @@ def query():
         system="You are a helpful assistant answering questions about a webpage. Answer the user's questions, using the provided context from the page if relevant.",
         query=f"Page content:\n{context_text}\n\nUser question: {user_query}",
         temperature=0.0,
-        lastk=5,  # Include last 5 messages for conversational context
-        session_id=conv_session_id,  # Separate conversation session
+        lastk=5,  # include last 5 messages for conversational context
+        session_id=conv_session_id,  # separate conversation session
     )
 
     print(response["response"])
