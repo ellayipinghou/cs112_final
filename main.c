@@ -1831,6 +1831,11 @@ bool is_ad_domain(const char *hostname) {
         "id5-sync.com",
         "optable.co",
         "liadm.com",
+        "sharethrough.com",
+        "image8.pubmatic.com",
+        "doubleverify.com",
+        "liadm.com",
+        "amazon-adsystem.com",
         NULL
     };
     
