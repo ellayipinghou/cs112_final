@@ -411,6 +411,7 @@ char *generate_allrecipes_chatbot_snippet(int client_fd) {
     if (!snippet) return NULL;
     
     snprintf(snippet, 16384,
+"<meta charset=\"UTF-8\">\n"
 "<div id=\"mitm-chat-toggle\" style=\"\n"
 " position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
 " padding: 12px 24px; background: #e85d04; color: white;\n" // orange for AllRecipes
@@ -714,6 +715,7 @@ char *generate_chatbot_snippet(int client_fd, bool is_allrecipes) {
     if (!snippet) return NULL;
 
     snprintf(snippet, 16384,
+"<meta charset=\"UTF-8\">\n"
 "<div id=\"mitm-chat-toggle\" style=\"\n"
 " position: fixed; top: 15px; right: 20px; z-index: 2147483647;\n"
 " padding: 12px 24px; background: #007bff; color: white;\n"
@@ -2562,30 +2564,46 @@ int decode_chunked_data(char *input, int input_len, char **output, int *output_c
 bool decompress_and_store(struct Connection *conn) {
     if (conn->html_offset == 0) return true;
     
-    // check first bytes to determine compression type
     unsigned char *data = (unsigned char *)conn->LLM_buf;
     bool is_gzip = (conn->html_offset >= 2 && data[0] == 0x1f && data[1] == 0x8b);
         
     if (is_gzip) {
-        // GZIP decompression
-        size_t decompressed_size = conn->html_offset * 10;
-        char *decompressed = malloc(decompressed_size);
+        // start with 20x buffer, grow if needed
+        size_t decompressed_capacity = conn->html_offset * 20;
+        char *decompressed = malloc(decompressed_capacity);
         if (!decompressed) return false;
         
         z_stream stream = {0};
         stream.next_in = (unsigned char *)conn->LLM_buf;
         stream.avail_in = conn->html_offset;
         stream.next_out = (unsigned char *)decompressed;
-        stream.avail_out = decompressed_size;
+        stream.avail_out = decompressed_capacity;
         
-        // initialize with gzip flag
         if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK) {
             free(decompressed);
             fprintf(stderr, "ERROR: inflateInit2 failed\n");
             return false;
         }
         
-        int ret = inflate(&stream, Z_FINISH);
+        int ret;
+        while ((ret = inflate(&stream, Z_FINISH)) == Z_BUF_ERROR) {
+            // buffer too small, double it
+            size_t new_capacity = decompressed_capacity * 2;
+            char *new_buf = realloc(decompressed, new_capacity);
+            if (!new_buf) {
+                inflateEnd(&stream);
+                free(decompressed);
+                return false;
+            }
+            
+            decompressed = new_buf;
+            stream.next_out = (unsigned char *)(decompressed + decompressed_capacity);
+            stream.avail_out = new_capacity - decompressed_capacity;
+            decompressed_capacity = new_capacity;
+            
+            fprintf(stderr, "DEBUG: Grew decompression buffer to %zu bytes\n", new_capacity);
+        }
+        
         if (ret != Z_STREAM_END && ret != Z_OK) {
             fprintf(stderr, "ERROR: inflate failed with code %d\n", ret);
             inflateEnd(&stream);
@@ -2596,23 +2614,23 @@ bool decompress_and_store(struct Connection *conn) {
         size_t actual_size = stream.total_out;
         inflateEnd(&stream);
         
-        fprintf(stderr, "DEBUG: Gzip decompressed to %zu bytes\n", actual_size);
+        fprintf(stderr, "DEBUG: Gzip decompressed %d -> %zu bytes (ratio: %.1fx)\n", 
+                conn->html_offset, actual_size, (float)actual_size / conn->html_offset);
         
-        // replace compressed data with decompressed data
         free(conn->LLM_buf);
         conn->LLM_buf = decompressed;
         conn->html_offset = actual_size;
-        conn->LLM_buf_capacity = decompressed_size;
+        conn->LLM_buf_capacity = decompressed_capacity;
         
         return true;
         
     } else {
-        // BROTLI decompression
-        size_t decompressed_size = conn->html_offset * 10;
-        char *decompressed = malloc(decompressed_size);
+        // Brotli - also grow buffer
+        size_t decompressed_capacity = conn->html_offset * 20;
+        char *decompressed = malloc(decompressed_capacity);
         if (!decompressed) return false;
         
-        size_t actual_size = decompressed_size;
+        size_t actual_size = decompressed_capacity;
         BrotliDecoderResult result = BrotliDecoderDecompress(
             conn->html_offset,
             (const uint8_t *)conn->LLM_buf,
@@ -2626,13 +2644,13 @@ bool decompress_and_store(struct Connection *conn) {
             return false;
         }
         
-        fprintf(stderr, "DEBUG: Brotli decompressed to %zu bytes\n", actual_size);
+        fprintf(stderr, "DEBUG: Brotli decompressed %d -> %zu bytes (ratio: %.1fx)\n",
+                conn->html_offset, actual_size, (float)actual_size / conn->html_offset);
         
-        // replace compressed data with decompressed data
         free(conn->LLM_buf);
         conn->LLM_buf = decompressed;
         conn->html_offset = actual_size;
-        conn->LLM_buf_capacity = decompressed_size;
+        conn->LLM_buf_capacity = decompressed_capacity;
         
         return true;
     }
