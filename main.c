@@ -2334,7 +2334,7 @@ bool read_response_body(int fd, fd_set *all_fds) {
         fprintf(stderr, "DEBUG: Accumulated %d bytes (total: %d, body_read: %d, content_length: %d)\n",
                 n, conn->html_offset, conn->body_bytes_read, conn->content_length);
     } else {
-        // Non-HTML: forward immediately
+        // non-HTML: forward immediately
         if (conn->is_https) {
             ssl_write_with_retry(conn->client_ssl, conn->buf, n, &should_retry);
         } else {
@@ -2970,6 +2970,17 @@ bool handle_https_tunnel(int fd, fd_set *all_fds) {
                     
                     fprintf(stderr, "DEBUG: Parsed HTTPS headers - is_html=%d, content_length=%d, is_chunked=%d, is_compressed=%d\n",
                             is_html, content_length, is_chunked, is_compressed);
+
+                    // skip chatbot for captchas and other unwanted URLs
+                    if (is_html && conn->url) {
+                        if (strstr(conn->url, "recaptcha") || 
+                            strstr(conn->url, "captcha") ||
+                            strstr(conn->url, "/bframe") ||
+                            strstr(conn->url, "gstatic.com")) {
+                            fprintf(stderr, "DEBUG: Skipping chatbot for: %s\n", conn->url);
+                            is_html = false;  // treat as non-HTML to skip chatbot injection
+                        }
+                    }
                     
                     // store headers for HTML response (remove Content-Encoding)
                     if (is_html) {
@@ -3205,7 +3216,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds) {
                     conn->tunnel_state = TUNNEL_EXPECT_RESPONSE_HEADERS;
                 }
                 
-                break;
+                return true;
             }
 
             case TUNNEL_READING_CHUNKED_RESPONSE: {
@@ -3380,7 +3391,7 @@ bool handle_https_tunnel(int fd, fd_set *all_fds) {
                     conn->tunnel_buf_offset = 0;
                 }
                 
-                break;
+                return true;
             }
 
             case TUNNEL_PASSTHROUGH: {
